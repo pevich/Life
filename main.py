@@ -17,10 +17,10 @@ VALID_FILE = "valid.txt"
 TRASH_FILE = "trash.txt"
 
 WAIT_LOGIN_SECONDS = 600
-WAIT_UI_SECONDS = 6
-POLL = 0.02
+WAIT_UI_SECONDS = 8
+POLL = 0.03
 
-# ✅ Быстрая проверка после "Пошук": сначала очень коротко, потом еще чуть-чуть
+# ✅ Адаптивне очікування після "Пошук" (замість 3.2 сек)
 FAST_WAIT_1 = 0.25
 FAST_WAIT_2 = 0.55
 
@@ -60,7 +60,7 @@ def append_lines(path, lines):
 class App:
     def __init__(self, root):
         self.root = root
-        self.root.title("Lifecell Checker FAST")
+        self.root.title("Lifecell Checker FAST (captcha OK)")
         self.root.geometry("840x540")
 
         self.status = tk.StringVar(value="Готово")
@@ -87,14 +87,7 @@ class App:
         self.log_box.pack(fill="both", expand=True, padx=14, pady=10)
         self.log_box.configure(state="disabled")
 
-        self._log_counter = 0
-
-    def log(self, msg, force=False):
-        # меньше логов = быстрее
-        self._log_counter += 1
-        if (not force) and (self._log_counter % 3 != 0):
-            return
-
+    def log(self, msg):
         def _append():
             self.log_box.configure(state="normal")
             self.log_box.insert("end", msg + "\n")
@@ -121,30 +114,51 @@ class App:
         driver.execute_script("arguments[0].scrollIntoView({block:'center'});", el)
         driver.execute_script("arguments[0].click();", el)
 
-    def ensure_msisdn(self, driver):
-        """
-        ✅ Быстро и без back:
-        если msisdn есть — работаем
-        если нет — один раз жмём “Клієнт”
-        """
-        if driver.find_elements(By.ID, "msisdn"):
-            return WebDriverWait(driver, WAIT_UI_SECONDS, poll_frequency=POLL)
-
-        # Клієнт
-        el = WebDriverWait(driver, WAIT_UI_SECONDS, poll_frequency=POLL).until(
-            EC.presence_of_element_located((
+    def wait_client_button(self, driver):
+        return WebDriverWait(driver, WAIT_UI_SECONDS, poll_frequency=POLL).until(
+            EC.element_to_be_clickable((
                 By.XPATH,
                 "//div[contains(@class,'content')][.//div[contains(@class,'label') and normalize-space(.)='Клієнт']]"
             ))
         )
-        self.js_click(driver, el)
 
-        w = WebDriverWait(driver, WAIT_UI_SECONDS, poll_frequency=POLL)
-        w.until(EC.presence_of_element_located((By.ID, "msisdn")))
-        return w
+    def click_client(self, driver):
+        self.js_click(driver, self.wait_client_button(driver))
+
+    def wait_msisdn_ready(self, driver):
+        wait = WebDriverWait(driver, WAIT_UI_SECONDS, poll_frequency=POLL)
+        wait.until(EC.presence_of_element_located((By.ID, "msisdn")))
+        wait.until(EC.element_to_be_clickable((By.ID, "msisdn")))
+        return wait
+
+    def click_back_if_exists(self, driver):
+        backs = driver.find_elements(By.XPATH, "//button[.//mat-icon[normalize-space(text())='arrow_back']]")
+        if backs:
+            self.js_click(driver, backs[0])
+            return True
+        return False
+
+    def back_to_home_and_open_client(self, driver):
+        """
+        ✅ НЕ змінюємо (твоя логіка)
+        """
+        for _ in range(4):
+            if driver.find_elements(By.ID, "msisdn"):
+                return self.wait_msisdn_ready(driver)
+
+            if driver.find_elements(By.XPATH,
+                "//div[contains(@class,'content')][.//div[contains(@class,'label') and normalize-space(.)='Клієнт']]"):
+                self.click_client(driver)
+                return self.wait_msisdn_ready(driver)
+
+            if not self.click_back_if_exists(driver):
+                break
+
+        self.click_client(driver)
+        return self.wait_msisdn_ready(driver)
 
     def set_number(self, driver, wait, number):
-        inp = wait.until(EC.presence_of_element_located((By.ID, "msisdn")))
+        inp = wait.until(EC.element_to_be_clickable((By.ID, "msisdn")))
         full = "380" + number
         driver.execute_script(
             """
@@ -162,60 +176,60 @@ class App:
         )
 
     def click_search(self, driver, wait):
-        # быстрее, чем element_to_be_clickable (анимации не стопорят)
-        btn = wait.until(EC.presence_of_element_located((
+        btn = wait.until(EC.element_to_be_clickable((
             By.XPATH, "//button[.//span[contains(@class,'mat-button-wrapper') and normalize-space(.)='Пошук']]"
         )))
         self.js_click(driver, btn)
 
     def has_services_button(self, driver):
-        return bool(driver.find_elements(
+        return len(driver.find_elements(
             By.XPATH,
             "//div[contains(@class,'content')][.//div[contains(@class,'label') and normalize-space(.)='Реєстрація послуг']]"
-        ))
+        )) > 0
 
     def has_start_pack(self, driver):
-        return bool(driver.find_elements(
+        return len(driver.find_elements(
             By.XPATH,
             "//div[contains(@class,'content')][.//div[contains(@class,'label') and normalize-space(.)='Реєстрація стартового пакету']]"
-        ))
+        )) > 0
 
+    # ✅ Адаптивна перевірка (швидше за 3.2 сек)
     def wait_services_adaptive(self, driver):
-        # очень быстрый шанс
         end1 = time.time() + FAST_WAIT_1
         while time.time() < end1:
             if self.has_services_button(driver):
                 return True
             time.sleep(POLL)
-        # ещё немного (если Angular подтормаживает)
+
         end2 = time.time() + FAST_WAIT_2
         while time.time() < end2:
             if self.has_services_button(driver):
                 return True
             time.sleep(POLL)
+
         return False
 
-    def click_start_pack(self, driver, timeout=4):
+    def click_start_pack(self, driver, timeout=5):
         el = WebDriverWait(driver, timeout, poll_frequency=POLL).until(
-            EC.presence_of_element_located((
+            EC.element_to_be_clickable((
                 By.XPATH,
                 "//div[contains(@class,'content')][.//div[contains(@class,'label') and normalize-space(.)='Реєстрація стартового пакету']]"
             ))
         )
         self.js_click(driver, el)
 
-    def click_register(self, driver, timeout=5):
+    def click_register(self, driver, timeout=6):
         btn = WebDriverWait(driver, timeout, poll_frequency=POLL).until(
-            EC.presence_of_element_located((
+            EC.element_to_be_clickable((
                 By.XPATH,
                 "//button[.//span[contains(@class,'mat-button-wrapper') and normalize-space(.)='Зареєструвати']]"
             ))
         )
         self.js_click(driver, btn)
 
-    def click_ok(self, driver, timeout=5):
+    def click_ok(self, driver, timeout=6):
         btn = WebDriverWait(driver, timeout, poll_frequency=POLL).until(
-            EC.presence_of_element_located((
+            EC.element_to_be_clickable((
                 By.XPATH,
                 "//button[.//span[contains(@class,'mat-button-wrapper') and normalize-space(.)='Ок']]"
             ))
@@ -236,7 +250,6 @@ class App:
         valid_buf = []
         trash_buf = []
 
-        # ✅ Быстрый Chrome, но КАРТИНКИ ВКЛЮЧЕНЫ (captcha OK)
         options = webdriver.ChromeOptions()
         options.add_argument("--disable-notifications")
         options.add_argument("--start-maximized")
@@ -245,6 +258,7 @@ class App:
         options.add_argument("--disable-dev-shm-usage")
         options.page_load_strategy = "eager"
 
+        # ✅ КАРТИНКИ УВІМКНЕНІ (CAPTCHA OK) — прибрали images:2
         prefs = {
             "profile.default_content_setting_values.notifications": 2
         }
@@ -259,13 +273,13 @@ class App:
 
         try:
             driver.get(URL)
-            self.log("Очікую логін/2FA/капчу...", force=True)
+            self.log("Очікую логін/2FA/капчу...")
 
             wait_login.until(EC.presence_of_element_located((
                 By.XPATH,
                 "//div[contains(@class,'content')][.//div[contains(@class,'label') and normalize-space(.)='Клієнт']]"
             )))
-            self.log("Авторизація OK", force=True)
+            self.log("Авторизація OK")
 
             for i, number in enumerate(numbers, 1):
                 if self.stop_event.is_set():
@@ -277,7 +291,8 @@ class App:
                 self.log(f"→ 380{number}")
 
                 try:
-                    wait = self.ensure_msisdn(driver)
+                    wait = self.back_to_home_and_open_client(driver)
+
                     self.set_number(driver, wait, number)
                     self.click_search(driver, wait)
 
@@ -285,7 +300,7 @@ class App:
 
                     if services_found:
                         if not self.has_start_pack(driver):
-                            self.log("  ⚠ Є «Реєстрація послуг», але нема «Реєстрація стартового пакету» → пропускаю")
+                            self.log("  ⚠ Є послуги, але нема стартового пакету → пропускаю")
                             trash_buf.append(number)
                         else:
                             self.log("  ✅ Є послуги + стартовий пакет → реєструю...")
@@ -297,11 +312,17 @@ class App:
                     else:
                         trash_buf.append(number)
 
+                    self.back_to_home_and_open_client(driver)
+
                 except Exception as e:
                     self.log(f"  ⚠ Помилка: {type(e).__name__}")
                     remaining_retry.append(number)
+                    try:
+                        self.back_to_home_and_open_client(driver)
+                    except Exception:
+                        pass
 
-            # ✅ Один раз пишем файлы — быстрее для 100+ номеров
+            # ✅ Пишемо 1 раз в кінці (швидко)
             append_lines(VALID_FILE, valid_buf)
             append_lines(TRASH_FILE, trash_buf)
             save_numbers(remaining_retry)
@@ -315,7 +336,7 @@ class App:
             self.root.after(0, lambda: self.status.set("Готово"))
             self.root.after(0, lambda: self.btn_start.configure(state="normal"))
             self.root.after(0, lambda: self.btn_stop.configure(state="disabled"))
-            self.log("Готово. valid.txt/trash.txt дописані, numbers.txt = тільки retry.", force=True)
+            self.log("Готово. valid.txt/trash.txt дописані, numbers.txt = тільки retry.")
 
 
 if __name__ == "__main__":
