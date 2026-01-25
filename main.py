@@ -20,7 +20,7 @@ WAIT_LOGIN_SECONDS = 600
 WAIT_UI_SECONDS = 6
 POLL = 0.02
 
-# адаптивний “після пошуку”
+# адаптивне очікування після "Пошук" (швидко для 100+ номерів)
 FAST_WAIT_1 = 0.25
 FAST_WAIT_2 = 0.55
 
@@ -60,8 +60,8 @@ def append_lines(path, lines):
 class App:
     def __init__(self, root):
         self.root = root
-        self.root.title("Lifecell Checker FAST")
-        self.root.geometry("840x540")
+        self.root.title("Lifecell Checker FAST (captcha OK)")
+        self.root.geometry("900x560")
 
         self.status = tk.StringVar(value="Готово")
         self.progress = tk.StringVar(value="0 / 0")
@@ -83,14 +83,14 @@ class App:
         self.btn_stop = ttk.Button(btns, text="⏹ Стоп", command=self.stop, state="disabled")
         self.btn_stop.pack(side="left", padx=10)
 
-        self.log_box = tk.Text(root, height=18)
+        self.log_box = tk.Text(root, height=20)
         self.log_box.pack(fill="both", expand=True, padx=14, pady=10)
         self.log_box.configure(state="disabled")
 
         self._log_counter = 0
 
     def log(self, msg, force=False):
-        # менше логів = швидше
+        # менше логів = швидше (але важливі можна force=True)
         self._log_counter += 1
         if (not force) and (self._log_counter % 3 != 0):
             return
@@ -132,9 +132,9 @@ class App:
 
     def ensure_msisdn(self, driver):
         """
-        ✅ НЕ міняємо твоє правило:
-        - якщо msisdn є — працюємо з ним
-        - якщо нема — один раз тиснемо “Клієнт”
+        ✅ Не міняємо:
+        якщо msisdn є — працюємо з ним
+        якщо нема — один раз тиснемо “Клієнт”
         """
         if driver.find_elements(By.ID, "msisdn"):
             return WebDriverWait(driver, WAIT_UI_SECONDS, poll_frequency=POLL)
@@ -236,6 +236,7 @@ class App:
         valid_buf = []
         trash_buf = []
 
+        # ✅ КАРТИНКИ ПОВЕРНЕНІ (капча працює)
         options = webdriver.ChromeOptions()
         options.add_argument("--disable-notifications")
         options.add_argument("--start-maximized")
@@ -244,9 +245,7 @@ class App:
         options.add_argument("--disable-dev-shm-usage")
         options.page_load_strategy = "eager"
 
-        # вимкнути картинки (реально прискорює)
         prefs = {
-            "profile.managed_default_content_settings.images": 2,
             "profile.default_content_setting_values.notifications": 2
         }
         options.add_experimental_option("prefs", prefs)
@@ -260,8 +259,9 @@ class App:
 
         try:
             driver.get(URL)
-            self.log("Очікую логін/2FA...", force=True)
+            self.log("Очікую логін/2FA/капчу...", force=True)
 
+            # ждем появление "Клієнт" — значит ты залогинился/прошёл капчу
             wait_login.until(EC.presence_of_element_located((
                 By.XPATH,
                 "//div[contains(@class,'content')][.//div[contains(@class,'label') and normalize-space(.)='Клієнт']]"
@@ -307,7 +307,7 @@ class App:
                     remaining_retry.append(number)
                     self.log(f"→ 380{number} : RETRY ({type(e).__name__})", force=True)
 
-            # Пишемо файли 1 раз — це швидко
+            # пишемо файли 1 раз — швидко
             append_lines(VALID_FILE, valid_buf)
             append_lines(TRASH_FILE, trash_buf)
             save_numbers(remaining_retry)
