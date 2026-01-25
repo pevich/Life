@@ -7,7 +7,6 @@ from tkinter import ttk, messagebox
 
 from selenium import webdriver
 from selenium.webdriver.common.by import By
-from selenium.webdriver.common.keys import Keys
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 
@@ -20,7 +19,7 @@ TRASH_FILE = "trash.txt"
 WAIT_LOGIN_SECONDS = 600
 WAIT_UI_SECONDS = 12
 
-# ✅ Ускорение проверки после "Пошук"
+# ✅ Ускорение проверки
 POLL = 0.02
 FAST_WAIT_1 = 0.25
 FAST_WAIT_2 = 0.55
@@ -140,9 +139,6 @@ class App:
         return False
 
     def back_to_home_and_open_client(self, driver):
-        """
-        НЕ міняємо: твоя логіка повернення.
-        """
         for _ in range(5):
             if driver.find_elements(By.ID, "msisdn"):
                 return self.wait_msisdn_ready(driver)
@@ -175,18 +171,8 @@ class App:
             """,
             inp, full
         )
-        return inp  # вернём элемент, чтобы можно было нажать Enter
 
-    def click_search_or_enter(self, driver, wait, msisdn_input):
-        """
-        ✅ Быстрее: сначала Enter в поле, если вдруг не сработало — жмём кнопку "Пошук".
-        """
-        try:
-            msisdn_input.send_keys(Keys.ENTER)
-            return
-        except Exception:
-            pass
-
+    def click_search(self, driver, wait):
         btn = wait.until(EC.element_to_be_clickable((
             By.XPATH, "//button[.//span[contains(@class,'mat-button-wrapper') and normalize-space(.)='Пошук']]"
         )))
@@ -199,10 +185,6 @@ class App:
         )) > 0
 
     def wait_services_adaptive(self, driver):
-        """
-        ✅ Самое главное ускорение:
-        максимум ~0.8 сек вместо 9 сек.
-        """
         end1 = time.time() + FAST_WAIT_1
         while time.time() < end1:
             if self.has_services_button(driver):
@@ -229,8 +211,7 @@ class App:
     def click_register(self, driver, timeout=8):
         btn = WebDriverWait(driver, timeout, poll_frequency=POLL).until(
             EC.element_to_be_clickable((
-                By.XPATH,
-                "//button[.//span[contains(@class,'mat-button-wrapper') and normalize-space(.)='Зареєструвати']]"
+                By.XPATH, "//button[.//span[contains(@class,'mat-button-wrapper') and normalize-space(.)='Зареєструвати']]"
             ))
         )
         self.js_click(driver, btn)
@@ -238,8 +219,7 @@ class App:
     def click_ok(self, driver, timeout=8):
         btn = WebDriverWait(driver, timeout, poll_frequency=POLL).until(
             EC.element_to_be_clickable((
-                By.XPATH,
-                "//button[.//span[contains(@class,'mat-button-wrapper') and normalize-space(.)='Ок']]"
+                By.XPATH, "//button[.//span[contains(@class,'mat-button-wrapper') and normalize-space(.)='Ок']]"
             ))
         )
         self.js_click(driver, btn)
@@ -263,7 +243,6 @@ class App:
         options.add_argument("--start-maximized")
         options.page_load_strategy = "eager"
 
-        # ✅ CAPTCHA OK: картинки НЕ отключаем
         prefs = {
             "profile.default_content_setting_values.notifications": 2
         }
@@ -298,19 +277,17 @@ class App:
                 try:
                     wait = self.back_to_home_and_open_client(driver)
 
-                    msisdn_el = self.set_number(driver, wait, number)
-                    self.click_search_or_enter(driver, wait, msisdn_el)
+                    self.set_number(driver, wait, number)
+                    self.click_search(driver, wait)
 
                     services_found = self.wait_services_adaptive(driver)
 
                     if services_found:
                         self.log("  ✅ Є «Реєстрація послуг» → Старт.пакет → Зареєструвати → Ок")
-
                         self.click_start_pack(driver)
                         time.sleep(0.2)
                         self.click_register(driver)
                         self.click_ok(driver)
-
                         valid_buf.append(number)
                         self.log("  ✔ Зареєстровано (VALID)")
                     else:
@@ -326,7 +303,6 @@ class App:
                     except Exception:
                         pass
 
-            # ✅ Быстро: пишем 1 раз в конце
             append_lines(VALID_FILE, valid_buf)
             append_lines(TRASH_FILE, trash_buf)
             save_numbers(remaining_retry)
