@@ -17,9 +17,12 @@ VALID_FILE = "valid.txt"
 TRASH_FILE = "trash.txt"
 
 WAIT_LOGIN_SECONDS = 600
-WAIT_UI_SECONDS = 8          # было 12
-WAIT_RESULT_SECONDS = 3.2    # было 9
-POLL = 0.03                  # было 0.08
+WAIT_UI_SECONDS = 6
+POLL = 0.02
+
+# адаптивний “після пошуку”
+FAST_WAIT_1 = 0.25
+FAST_WAIT_2 = 0.55
 
 
 def load_numbers():
@@ -37,13 +40,21 @@ def load_numbers():
                 out.append(s[3:])
             else:
                 out.append(s)
-    return list(dict.fromkeys(out))
+    return list(dict.fromkeys(out))  # прибрати дублі, зберегти порядок
 
 
 def save_numbers(numbers):
     with open(NUMBERS_FILE, "w", encoding="utf-8") as f:
         for n in numbers:
             f.write(n + "\n")
+
+
+def append_lines(path, lines):
+    if not lines:
+        return
+    with open(path, "a", encoding="utf-8") as f:
+        for x in lines:
+            f.write(x + "\n")
 
 
 class App:
@@ -76,7 +87,14 @@ class App:
         self.log_box.pack(fill="both", expand=True, padx=14, pady=10)
         self.log_box.configure(state="disabled")
 
-    def log(self, msg):
+        self._log_counter = 0
+
+    def log(self, msg, force=False):
+        # менше логів = швидше
+        self._log_counter += 1
+        if (not force) and (self._log_counter % 3 != 0):
+            return
+
         def _append():
             self.log_box.configure(state="normal")
             self.log_box.insert("end", msg + "\n")
@@ -103,52 +121,31 @@ class App:
         driver.execute_script("arguments[0].scrollIntoView({block:'center'});", el)
         driver.execute_script("arguments[0].click();", el)
 
-    def wait_client_button(self, driver):
-        return WebDriverWait(driver, WAIT_UI_SECONDS, poll_frequency=POLL).until(
-            EC.element_to_be_clickable((
+    def click_client_once(self, driver):
+        el = WebDriverWait(driver, WAIT_UI_SECONDS, poll_frequency=POLL).until(
+            EC.presence_of_element_located((
                 By.XPATH,
                 "//div[contains(@class,'content')][.//div[contains(@class,'label') and normalize-space(.)='Клієнт']]"
             ))
         )
+        self.js_click(driver, el)
 
-    def click_client(self, driver):
-        self.js_click(driver, self.wait_client_button(driver))
-
-    def wait_msisdn_ready(self, driver):
-        wait = WebDriverWait(driver, WAIT_UI_SECONDS, poll_frequency=POLL)
-        wait.until(EC.presence_of_element_located((By.ID, "msisdn")))
-        wait.until(EC.element_to_be_clickable((By.ID, "msisdn")))
-        return wait
-
-    def click_back_if_exists(self, driver):
-        backs = driver.find_elements(By.XPATH, "//button[.//mat-icon[normalize-space(text())='arrow_back']]")
-        if backs:
-            self.js_click(driver, backs[0])
-            return True
-        return False
-
-    def back_to_home_and_open_client(self, driver):
+    def ensure_msisdn(self, driver):
         """
-        Повертаємось поки не побачимо msisdn або кнопку "Клієнт".
-        Максимально коротко (для швидкості).
+        ✅ НЕ міняємо твоє правило:
+        - якщо msisdn є — працюємо з ним
+        - якщо нема — один раз тиснемо “Клієнт”
         """
-        for _ in range(4):
-            if driver.find_elements(By.ID, "msisdn"):
-                return self.wait_msisdn_ready(driver)
+        if driver.find_elements(By.ID, "msisdn"):
+            return WebDriverWait(driver, WAIT_UI_SECONDS, poll_frequency=POLL)
 
-            if driver.find_elements(By.XPATH,
-                "//div[contains(@class,'content')][.//div[contains(@class,'label') and normalize-space(.)='Клієнт']]"):
-                self.click_client(driver)
-                return self.wait_msisdn_ready(driver)
-
-            if not self.click_back_if_exists(driver):
-                break
-
-        self.click_client(driver)
-        return self.wait_msisdn_ready(driver)
+        self.click_client_once(driver)
+        w = WebDriverWait(driver, WAIT_UI_SECONDS, poll_frequency=POLL)
+        w.until(EC.presence_of_element_located((By.ID, "msisdn")))
+        return w
 
     def set_number(self, driver, wait, number):
-        inp = wait.until(EC.element_to_be_clickable((By.ID, "msisdn")))
+        inp = wait.until(EC.presence_of_element_located((By.ID, "msisdn")))
         full = "380" + number
         driver.execute_script(
             """
@@ -166,59 +163,59 @@ class App:
         )
 
     def click_search(self, driver, wait):
-        btn = wait.until(EC.element_to_be_clickable((
+        btn = wait.until(EC.presence_of_element_located((
             By.XPATH, "//button[.//span[contains(@class,'mat-button-wrapper') and normalize-space(.)='Пошук']]"
         )))
         self.js_click(driver, btn)
 
-    # ✅ Проверка "Реєстрація послуг"
-    def has_services_button(self, driver):
-        return len(driver.find_elements(
+    def has_services(self, driver):
+        return bool(driver.find_elements(
             By.XPATH,
             "//div[contains(@class,'content')][.//div[contains(@class,'label') and normalize-space(.)='Реєстрація послуг']]"
-        )) > 0
+        ))
 
-    # ✅ Проверка "Реєстрація стартового пакету"
     def has_start_pack(self, driver):
-        return len(driver.find_elements(
+        return bool(driver.find_elements(
             By.XPATH,
             "//div[contains(@class,'content')][.//div[contains(@class,'label') and normalize-space(.)='Реєстрація стартового пакету']]"
-        )) > 0
+        ))
 
-    def wait_services_short(self, driver):
-        """
-        Быстрая проверка после 'Пошук':
-        ждем до WAIT_RESULT_SECONDS появления 'Реєстрація послуг'.
-        Если не появилось — считаем что нет.
-        """
-        end = time.time() + WAIT_RESULT_SECONDS
-        while time.time() < end:
-            if self.has_services_button(driver):
+    def wait_services_adaptive(self, driver):
+        # 1) дуже швидкий шанс
+        end1 = time.time() + FAST_WAIT_1
+        while time.time() < end1:
+            if self.has_services(driver):
+                return True
+            time.sleep(POLL)
+        # 2) ще трохи, якщо Angular запізнився
+        end2 = time.time() + FAST_WAIT_2
+        while time.time() < end2:
+            if self.has_services(driver):
                 return True
             time.sleep(POLL)
         return False
 
-    def click_start_pack(self, driver, timeout=5):
+    def click_start_pack(self, driver, timeout=4):
         el = WebDriverWait(driver, timeout, poll_frequency=POLL).until(
-            EC.element_to_be_clickable((
+            EC.presence_of_element_located((
                 By.XPATH,
                 "//div[contains(@class,'content')][.//div[contains(@class,'label') and normalize-space(.)='Реєстрація стартового пакету']]"
             ))
         )
         self.js_click(driver, el)
 
-    def click_register(self, driver, timeout=6):
+    def click_register(self, driver, timeout=5):
         btn = WebDriverWait(driver, timeout, poll_frequency=POLL).until(
-            EC.element_to_be_clickable((
+            EC.presence_of_element_located((
                 By.XPATH,
                 "//button[.//span[contains(@class,'mat-button-wrapper') and normalize-space(.)='Зареєструвати']]"
             ))
         )
         self.js_click(driver, btn)
 
-    def click_ok(self, driver, timeout=6):
+    def click_ok(self, driver, timeout=5):
         btn = WebDriverWait(driver, timeout, poll_frequency=POLL).until(
-            EC.element_to_be_clickable((
+            EC.presence_of_element_located((
                 By.XPATH,
                 "//button[.//span[contains(@class,'mat-button-wrapper') and normalize-space(.)='Ок']]"
             ))
@@ -235,9 +232,10 @@ class App:
             self.root.after(0, lambda: self.btn_stop.configure(state="disabled"))
             return
 
-        remaining_retry = []  # только те, что НЕ удалось обработать (ошибка/стоп)
+        remaining_retry = []
+        valid_buf = []
+        trash_buf = []
 
-        # ✅ Ускоряем Chrome: eager + отключаем картинки/анимации
         options = webdriver.ChromeOptions()
         options.add_argument("--disable-notifications")
         options.add_argument("--start-maximized")
@@ -246,8 +244,9 @@ class App:
         options.add_argument("--disable-dev-shm-usage")
         options.page_load_strategy = "eager"
 
+        # вимкнути картинки (реально прискорює)
         prefs = {
-            "profile.managed_default_content_settings.images": 2,      # no images
+            "profile.managed_default_content_settings.images": 2,
             "profile.default_content_setting_values.notifications": 2
         }
         options.add_experimental_option("prefs", prefs)
@@ -261,13 +260,13 @@ class App:
 
         try:
             driver.get(URL)
-            self.log("Очікую логін/2FA...")
+            self.log("Очікую логін/2FA...", force=True)
 
             wait_login.until(EC.presence_of_element_located((
                 By.XPATH,
                 "//div[contains(@class,'content')][.//div[contains(@class,'label') and normalize-space(.)='Клієнт']]"
             )))
-            self.log("Авторизація OK")
+            self.log("Авторизація OK", force=True)
 
             for i, number in enumerate(numbers, 1):
                 if self.stop_event.is_set():
@@ -276,46 +275,41 @@ class App:
 
                 self.root.after(0, lambda i=i, total=total: self.progress.set(f"{i} / {total}"))
                 self.root.after(0, lambda n=number: self.status.set(f"380{n}"))
-                self.log(f"→ 380{number}")
 
                 try:
-                    wait = self.back_to_home_and_open_client(driver)
+                    wait = self.ensure_msisdn(driver)
 
                     self.set_number(driver, wait, number)
                     self.click_search(driver, wait)
 
-                    services_found = self.wait_services_short(driver)
+                    if not self.wait_services_adaptive(driver):
+                        # нема "Реєстрація послуг"
+                        trash_buf.append(number)
+                        self.log(f"→ 380{number} : TRASH")
+                        continue
 
-                    if services_found:
-                        # ✅ Новое требование: если "Реєстрація послуг" есть, но "Стартовий пакет" НЕТ — просто следующий номер
-                        if not self.has_start_pack(driver):
-                            self.log("  ⚠ Є «Реєстрація послуг», але нема «Реєстрація стартового пакету» → пропускаю")
-                            with open(TRASH_FILE, "a", encoding="utf-8") as f:
-                                f.write(number + "\n")
-                        else:
-                            self.log("  ✅ Є «Реєстрація послуг» + «Стартовий пакет» → реєструю...")
-                            self.click_start_pack(driver)
-                            self.click_register(driver)
-                            self.click_ok(driver)
+                    # є "Реєстрація послуг"
+                    if not self.has_start_pack(driver):
+                        # є послуги, але нема стартового пакету — одразу наступний
+                        trash_buf.append(number)
+                        self.log(f"→ 380{number} : SERVICES без START PACK (skip)")
+                        continue
 
-                            with open(VALID_FILE, "a", encoding="utf-8") as f:
-                                f.write(number + "\n")
-                            self.log("  ✔ Зареєстровано (VALID)")
-                    else:
-                        self.log("  ❓ Нема «Реєстрація послуг» → UNKNOWN/TRASH")
-                        with open(TRASH_FILE, "a", encoding="utf-8") as f:
-                            f.write(number + "\n")
+                    # є послуги + стартовий пакет → реєструємо
+                    self.click_start_pack(driver)
+                    self.click_register(driver)
+                    self.click_ok(driver)
 
-                    self.back_to_home_and_open_client(driver)
+                    valid_buf.append(number)
+                    self.log(f"→ 380{number} : VALID (registered)")
 
                 except Exception as e:
-                    self.log(f"  ⚠ Помилка: {type(e).__name__}")
                     remaining_retry.append(number)
-                    try:
-                        self.back_to_home_and_open_client(driver)
-                    except Exception:
-                        pass
+                    self.log(f"→ 380{number} : RETRY ({type(e).__name__})", force=True)
 
+            # Пишемо файли 1 раз — це швидко
+            append_lines(VALID_FILE, valid_buf)
+            append_lines(TRASH_FILE, trash_buf)
             save_numbers(remaining_retry)
 
         finally:
@@ -327,7 +321,7 @@ class App:
             self.root.after(0, lambda: self.status.set("Готово"))
             self.root.after(0, lambda: self.btn_start.configure(state="normal"))
             self.root.after(0, lambda: self.btn_stop.configure(state="disabled"))
-            self.log("Готово. Файли: valid.txt / trash.txt / numbers.txt (тільки retry).")
+            self.log("Готово. valid/trash дописані. numbers.txt = тільки retry.", force=True)
 
 
 if __name__ == "__main__":
