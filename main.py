@@ -37,8 +37,7 @@ def load_numbers():
                 out.append(s[3:])
             else:
                 out.append(s)
-    # убрать дубли, сохранить порядок
-    out = list(dict.fromkeys(out))
+    out = list(dict.fromkeys(out))  # убрать дубли, сохранить порядок
     return out
 
 
@@ -145,7 +144,6 @@ class App:
             if not self.click_back_if_exists(driver):
                 break
 
-        # fallback
         self.click_client(driver)
         return self.wait_msisdn_ready(driver)
 
@@ -173,8 +171,7 @@ class App:
         )))
         self.js_click(driver, btn)
 
-    # ✅ Проверяем именно этот блок:
-    # <div class="content"><div class="label">Реєстрація послуг</div></div>
+    # ✅ Проверка: есть ли блок "Реєстрація послуг"
     def has_services_button(self, driver):
         return len(driver.find_elements(
             By.XPATH,
@@ -183,8 +180,8 @@ class App:
 
     def wait_result_ui(self, driver):
         """
-        Ждём появления "Реєстрація послуг" до WAIT_RESULT_SECONDS,
-        если нет — продолжаем (будет UNKNOWN/TRASH).
+        Ждём до WAIT_RESULT_SECONDS пока появится "Реєстрація послуг".
+        Если не появилось — считаем, что его нет.
         """
         end = time.time() + WAIT_RESULT_SECONDS
         while time.time() < end:
@@ -193,18 +190,28 @@ class App:
             time.sleep(POLL)
         return False
 
-    # ✅ Клик по chevron_right (как ты показал)
-    def click_chevron_right(self, driver, timeout=6):
+    # ✅ Клик "Реєстрація стартового пакету" (как label)
+    def click_start_pack(self, driver, timeout=8):
         el = WebDriverWait(driver, timeout, poll_frequency=POLL).until(
             EC.element_to_be_clickable((
                 By.XPATH,
-                "//mat-icon[normalize-space(.)='chevron_right']"
+                "//div[contains(@class,'content')][.//div[contains(@class,'label') and normalize-space(.)='Реєстрація стартового пакету']]"
             ))
         )
         self.js_click(driver, el)
 
-    # ✅ Клик по кнопке "Ок"
-    def click_ok_button(self, driver, timeout=6):
+    # ✅ Клик "Зареєструвати"
+    def click_register(self, driver, timeout=8):
+        btn = WebDriverWait(driver, timeout, poll_frequency=POLL).until(
+            EC.element_to_be_clickable((
+                By.XPATH,
+                "//button[.//span[contains(@class,'mat-button-wrapper') and normalize-space(.)='Зареєструвати']]"
+            ))
+        )
+        self.js_click(driver, btn)
+
+    # ✅ Клик "Ок"
+    def click_ok(self, driver, timeout=8):
         btn = WebDriverWait(driver, timeout, poll_frequency=POLL).until(
             EC.element_to_be_clickable((
                 By.XPATH,
@@ -223,7 +230,7 @@ class App:
             self.root.after(0, lambda: self.btn_stop.configure(state="disabled"))
             return
 
-        remaining_retry = []  # сюда — только те, что НЕ удалось обработать (ошибка/стоп)
+        remaining_retry = []  # только те, что НЕ удалось обработать (ошибка/стоп)
 
         options = webdriver.ChromeOptions()
         options.add_argument("--disable-notifications")
@@ -240,6 +247,7 @@ class App:
             driver.get(URL)
             self.log("Очікую логін/2FA...")
 
+            # залогинен — когда видим кнопку "Клієнт"
             wait_login.until(EC.presence_of_element_located((
                 By.XPATH,
                 "//div[contains(@class,'content')][.//div[contains(@class,'label') and normalize-space(.)='Клієнт']]"
@@ -264,27 +272,30 @@ class App:
                     self.wait_result_ui(driver)
 
                     if self.has_services_button(driver):
-                        self.log("  ✅ Є «Реєстрація послуг» → VALID, клікаю chevron_right → Ok...")
+                        self.log("  ✅ Є «Реєстрація послуг» → роблю: Старт.пакет → Зареєструвати → Ок")
 
-                        # 1) chevron_right
-                        self.click_chevron_right(driver)
+                        # 1) Реєстрація стартового пакету
+                        self.click_start_pack(driver)
 
-                        # (оверлей отдельно не кликаем — он не нужен)
+                        # маленькая пауза, чтобы кнопка появилась стабильно
                         time.sleep(0.2)
 
-                        # 2) Ok
-                        self.click_ok_button(driver)
+                        # 2) Зареєструвати
+                        self.click_register(driver)
+
+                        # 3) Ок (если появится чуть позже — подождём)
+                        self.click_ok(driver)
 
                         with open(VALID_FILE, "a", encoding="utf-8") as f:
                             f.write(number + "\n")
 
-                        self.log("  ✔ Готово: chevron_right → Ok")
+                        self.log("  ✔ Зареєстровано (VALID)")
                     else:
                         self.log("  ❓ Нема «Реєстрація послуг» → UNKNOWN/TRASH")
                         with open(TRASH_FILE, "a", encoding="utf-8") as f:
                             f.write(number + "\n")
 
-                    # всегда готовим форму для следующего номера
+                    # только теперь — к следующему
                     self.back_to_home_and_open_client(driver)
 
                 except Exception as e:
