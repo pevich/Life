@@ -17,9 +17,9 @@ VALID_FILE = "valid.txt"
 TRASH_FILE = "trash.txt"
 
 WAIT_LOGIN_SECONDS = 600
-WAIT_UI_SECONDS = 12
-WAIT_RESULT_SECONDS = 9
-POLL = 0.08
+WAIT_UI_SECONDS = 8          # было 12
+WAIT_RESULT_SECONDS = 3.2    # было 9
+POLL = 0.03                  # было 0.08
 
 
 def load_numbers():
@@ -37,8 +37,7 @@ def load_numbers():
                 out.append(s[3:])
             else:
                 out.append(s)
-    out = list(dict.fromkeys(out))  # убрать дубли, сохранить порядок
-    return out
+    return list(dict.fromkeys(out))
 
 
 def save_numbers(numbers):
@@ -50,8 +49,8 @@ def save_numbers(numbers):
 class App:
     def __init__(self, root):
         self.root = root
-        self.root.title("Lifecell Checker")
-        self.root.geometry("820x520")
+        self.root.title("Lifecell Checker FAST")
+        self.root.geometry("840x540")
 
         self.status = tk.StringVar(value="Готово")
         self.progress = tk.StringVar(value="0 / 0")
@@ -59,7 +58,7 @@ class App:
         self.stop_event = threading.Event()
         self.worker = None
 
-        ttk.Label(root, text="Lifecell Checker", font=("Segoe UI", 18, "bold")).pack(pady=10)
+        ttk.Label(root, text="Lifecell Checker FAST", font=("Segoe UI", 18, "bold")).pack(pady=10)
 
         bar = ttk.Frame(root)
         bar.pack(fill="x", padx=14, pady=4)
@@ -131,8 +130,9 @@ class App:
     def back_to_home_and_open_client(self, driver):
         """
         Повертаємось поки не побачимо msisdn або кнопку "Клієнт".
+        Максимально коротко (для швидкості).
         """
-        for _ in range(5):
+        for _ in range(4):
             if driver.find_elements(By.ID, "msisdn"):
                 return self.wait_msisdn_ready(driver)
 
@@ -171,17 +171,25 @@ class App:
         )))
         self.js_click(driver, btn)
 
-    # ✅ Проверка: есть ли блок "Реєстрація послуг"
+    # ✅ Проверка "Реєстрація послуг"
     def has_services_button(self, driver):
         return len(driver.find_elements(
             By.XPATH,
             "//div[contains(@class,'content')][.//div[contains(@class,'label') and normalize-space(.)='Реєстрація послуг']]"
         )) > 0
 
-    def wait_result_ui(self, driver):
+    # ✅ Проверка "Реєстрація стартового пакету"
+    def has_start_pack(self, driver):
+        return len(driver.find_elements(
+            By.XPATH,
+            "//div[contains(@class,'content')][.//div[contains(@class,'label') and normalize-space(.)='Реєстрація стартового пакету']]"
+        )) > 0
+
+    def wait_services_short(self, driver):
         """
-        Ждём до WAIT_RESULT_SECONDS пока появится "Реєстрація послуг".
-        Если не появилось — считаем, что его нет.
+        Быстрая проверка после 'Пошук':
+        ждем до WAIT_RESULT_SECONDS появления 'Реєстрація послуг'.
+        Если не появилось — считаем что нет.
         """
         end = time.time() + WAIT_RESULT_SECONDS
         while time.time() < end:
@@ -190,8 +198,7 @@ class App:
             time.sleep(POLL)
         return False
 
-    # ✅ Клик "Реєстрація стартового пакету" (как label)
-    def click_start_pack(self, driver, timeout=8):
+    def click_start_pack(self, driver, timeout=5):
         el = WebDriverWait(driver, timeout, poll_frequency=POLL).until(
             EC.element_to_be_clickable((
                 By.XPATH,
@@ -200,8 +207,7 @@ class App:
         )
         self.js_click(driver, el)
 
-    # ✅ Клик "Зареєструвати"
-    def click_register(self, driver, timeout=8):
+    def click_register(self, driver, timeout=6):
         btn = WebDriverWait(driver, timeout, poll_frequency=POLL).until(
             EC.element_to_be_clickable((
                 By.XPATH,
@@ -210,8 +216,7 @@ class App:
         )
         self.js_click(driver, btn)
 
-    # ✅ Клик "Ок"
-    def click_ok(self, driver, timeout=8):
+    def click_ok(self, driver, timeout=6):
         btn = WebDriverWait(driver, timeout, poll_frequency=POLL).until(
             EC.element_to_be_clickable((
                 By.XPATH,
@@ -232,9 +237,20 @@ class App:
 
         remaining_retry = []  # только те, что НЕ удалось обработать (ошибка/стоп)
 
+        # ✅ Ускоряем Chrome: eager + отключаем картинки/анимации
         options = webdriver.ChromeOptions()
         options.add_argument("--disable-notifications")
         options.add_argument("--start-maximized")
+        options.add_argument("--disable-gpu")
+        options.add_argument("--no-sandbox")
+        options.add_argument("--disable-dev-shm-usage")
+        options.page_load_strategy = "eager"
+
+        prefs = {
+            "profile.managed_default_content_settings.images": 2,      # no images
+            "profile.default_content_setting_values.notifications": 2
+        }
+        options.add_experimental_option("prefs", prefs)
 
         driver = webdriver.Chrome(options=options)
         wait_login = WebDriverWait(driver, WAIT_LOGIN_SECONDS, poll_frequency=POLL)
@@ -247,7 +263,6 @@ class App:
             driver.get(URL)
             self.log("Очікую логін/2FA...")
 
-            # залогинен — когда видим кнопку "Клієнт"
             wait_login.until(EC.presence_of_element_located((
                 By.XPATH,
                 "//div[contains(@class,'content')][.//div[contains(@class,'label') and normalize-space(.)='Клієнт']]"
@@ -269,33 +284,28 @@ class App:
                     self.set_number(driver, wait, number)
                     self.click_search(driver, wait)
 
-                    self.wait_result_ui(driver)
+                    services_found = self.wait_services_short(driver)
 
-                    if self.has_services_button(driver):
-                        self.log("  ✅ Є «Реєстрація послуг» → роблю: Старт.пакет → Зареєструвати → Ок")
+                    if services_found:
+                        # ✅ Новое требование: если "Реєстрація послуг" есть, но "Стартовий пакет" НЕТ — просто следующий номер
+                        if not self.has_start_pack(driver):
+                            self.log("  ⚠ Є «Реєстрація послуг», але нема «Реєстрація стартового пакету» → пропускаю")
+                            with open(TRASH_FILE, "a", encoding="utf-8") as f:
+                                f.write(number + "\n")
+                        else:
+                            self.log("  ✅ Є «Реєстрація послуг» + «Стартовий пакет» → реєструю...")
+                            self.click_start_pack(driver)
+                            self.click_register(driver)
+                            self.click_ok(driver)
 
-                        # 1) Реєстрація стартового пакету
-                        self.click_start_pack(driver)
-
-                        # маленькая пауза, чтобы кнопка появилась стабильно
-                        time.sleep(0.2)
-
-                        # 2) Зареєструвати
-                        self.click_register(driver)
-
-                        # 3) Ок (если появится чуть позже — подождём)
-                        self.click_ok(driver)
-
-                        with open(VALID_FILE, "a", encoding="utf-8") as f:
-                            f.write(number + "\n")
-
-                        self.log("  ✔ Зареєстровано (VALID)")
+                            with open(VALID_FILE, "a", encoding="utf-8") as f:
+                                f.write(number + "\n")
+                            self.log("  ✔ Зареєстровано (VALID)")
                     else:
                         self.log("  ❓ Нема «Реєстрація послуг» → UNKNOWN/TRASH")
                         with open(TRASH_FILE, "a", encoding="utf-8") as f:
                             f.write(number + "\n")
 
-                    # только теперь — к следующему
                     self.back_to_home_and_open_client(driver)
 
                 except Exception as e:
@@ -306,7 +316,6 @@ class App:
                     except Exception:
                         pass
 
-            # numbers.txt: остаются только retry (ошибка/стоп)
             save_numbers(remaining_retry)
 
         finally:
