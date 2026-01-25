@@ -79,7 +79,6 @@ class App:
         self.log_box.configure(state="disabled")
 
     def log(self, msg):
-        # Tk safe: вызываем из потока через after
         def _append():
             self.log_box.configure(state="normal")
             self.log_box.insert("end", msg + "\n")
@@ -174,7 +173,7 @@ class App:
         )))
         self.js_click(driver, btn)
 
-    # ✅ ВАЖНО: проверяем именно тот блок, который ты дал:
+    # ✅ Проверяем именно этот блок:
     # <div class="content"><div class="label">Реєстрація послуг</div></div>
     def has_services_button(self, driver):
         return len(driver.find_elements(
@@ -184,8 +183,8 @@ class App:
 
     def wait_result_ui(self, driver):
         """
-        Ждём появление кнопки "Реєстрація послуг" до WAIT_RESULT_SECONDS,
-        если её нет — просто продолжаем (это будет UNKNOWN/TRASH).
+        Ждём появления "Реєстрація послуг" до WAIT_RESULT_SECONDS,
+        если нет — продолжаем (будет UNKNOWN/TRASH).
         """
         end = time.time() + WAIT_RESULT_SECONDS
         while time.time() < end:
@@ -193,6 +192,26 @@ class App:
                 return True
             time.sleep(POLL)
         return False
+
+    # ✅ Клик по chevron_right (как ты показал)
+    def click_chevron_right(self, driver, timeout=6):
+        el = WebDriverWait(driver, timeout, poll_frequency=POLL).until(
+            EC.element_to_be_clickable((
+                By.XPATH,
+                "//mat-icon[normalize-space(.)='chevron_right']"
+            ))
+        )
+        self.js_click(driver, el)
+
+    # ✅ Клик по кнопке "Ок"
+    def click_ok_button(self, driver, timeout=6):
+        btn = WebDriverWait(driver, timeout, poll_frequency=POLL).until(
+            EC.element_to_be_clickable((
+                By.XPATH,
+                "//button[.//span[contains(@class,'mat-button-wrapper') and normalize-space(.)='Ок']]"
+            ))
+        )
+        self.js_click(driver, btn)
 
     # ---------- MAIN ----------
 
@@ -206,12 +225,11 @@ class App:
 
         remaining_retry = []  # сюда — только те, что НЕ удалось обработать (ошибка/стоп)
 
-        # Chrome options (чуть стабильнее)
         options = webdriver.ChromeOptions()
         options.add_argument("--disable-notifications")
         options.add_argument("--start-maximized")
 
-        driver = webdriver.Chrome(options=options)  # Selenium Manager сам подтянет драйвер
+        driver = webdriver.Chrome(options=options)
         wait_login = WebDriverWait(driver, WAIT_LOGIN_SECONDS, poll_frequency=POLL)
 
         total = len(numbers)
@@ -222,7 +240,6 @@ class App:
             driver.get(URL)
             self.log("Очікую логін/2FA...")
 
-            # считаем "залогинился" когда видим кнопку "Клієнт"
             wait_login.until(EC.presence_of_element_located((
                 By.XPATH,
                 "//div[contains(@class,'content')][.//div[contains(@class,'label') and normalize-space(.)='Клієнт']]"
@@ -231,7 +248,6 @@ class App:
 
             for i, number in enumerate(numbers, 1):
                 if self.stop_event.is_set():
-                    # все оставшиеся — в retry
                     remaining_retry.extend(numbers[i-1:])
                     break
 
@@ -240,7 +256,6 @@ class App:
                 self.log(f"→ 380{number}")
 
                 try:
-                    # всегда возвращаемся к форме и открываем "Клієнт" если нужно
                     wait = self.back_to_home_and_open_client(driver)
 
                     self.set_number(driver, wait, number)
@@ -249,19 +264,30 @@ class App:
                     self.wait_result_ui(driver)
 
                     if self.has_services_button(driver):
-                        self.log("  ✅ Є «Реєстрація послуг» → VALID")
+                        self.log("  ✅ Є «Реєстрація послуг» → VALID, клікаю chevron_right → Ok...")
+
+                        # 1) chevron_right
+                        self.click_chevron_right(driver)
+
+                        # (оверлей отдельно не кликаем — он не нужен)
+                        time.sleep(0.2)
+
+                        # 2) Ok
+                        self.click_ok_button(driver)
+
                         with open(VALID_FILE, "a", encoding="utf-8") as f:
                             f.write(number + "\n")
+
+                        self.log("  ✔ Готово: chevron_right → Ok")
                     else:
                         self.log("  ❓ Нема «Реєстрація послуг» → UNKNOWN/TRASH")
                         with open(TRASH_FILE, "a", encoding="utf-8") as f:
                             f.write(number + "\n")
 
-                    # готовим форму для следующего
+                    # всегда готовим форму для следующего номера
                     self.back_to_home_and_open_client(driver)
 
                 except Exception as e:
-                    # при ошибке — в retry, чтобы повторить позже
                     self.log(f"  ⚠ Помилка: {type(e).__name__}")
                     remaining_retry.append(number)
                     try:
@@ -269,7 +295,7 @@ class App:
                     except Exception:
                         pass
 
-            # numbers.txt: остаются только те, что не удалось обработать (ошибка/стоп)
+            # numbers.txt: остаются только retry (ошибка/стоп)
             save_numbers(remaining_retry)
 
         finally:
