@@ -17,12 +17,9 @@ VALID_FILE = "valid.txt"
 TRASH_FILE = "trash.txt"
 
 WAIT_LOGIN_SECONDS = 600
-WAIT_UI_SECONDS = 8
-POLL = 0.03
-
-# ✅ Адаптивне очікування після "Пошук" (замість 3.2 сек)
-FAST_WAIT_1 = 0.25
-FAST_WAIT_2 = 0.55
+WAIT_UI_SECONDS = 8          # было 12
+WAIT_RESULT_SECONDS = 3.2    # было 9
+POLL = 0.03                  # было 0.08
 
 
 def load_numbers():
@@ -49,18 +46,10 @@ def save_numbers(numbers):
             f.write(n + "\n")
 
 
-def append_lines(path, lines):
-    if not lines:
-        return
-    with open(path, "a", encoding="utf-8") as f:
-        for x in lines:
-            f.write(x + "\n")
-
-
 class App:
     def __init__(self, root):
         self.root = root
-        self.root.title("Lifecell Checker FAST (captcha OK)")
+        self.root.title("Lifecell Checker FAST")
         self.root.geometry("840x540")
 
         self.status = tk.StringVar(value="Готово")
@@ -140,7 +129,8 @@ class App:
 
     def back_to_home_and_open_client(self, driver):
         """
-        ✅ НЕ змінюємо (твоя логіка)
+        Повертаємось поки не побачимо msisdn або кнопку "Клієнт".
+        Максимально коротко (для швидкості).
         """
         for _ in range(4):
             if driver.find_elements(By.ID, "msisdn"):
@@ -181,32 +171,31 @@ class App:
         )))
         self.js_click(driver, btn)
 
+    # ✅ Проверка "Реєстрація послуг"
     def has_services_button(self, driver):
         return len(driver.find_elements(
             By.XPATH,
             "//div[contains(@class,'content')][.//div[contains(@class,'label') and normalize-space(.)='Реєстрація послуг']]"
         )) > 0
 
+    # ✅ Проверка "Реєстрація стартового пакету"
     def has_start_pack(self, driver):
         return len(driver.find_elements(
             By.XPATH,
             "//div[contains(@class,'content')][.//div[contains(@class,'label') and normalize-space(.)='Реєстрація стартового пакету']]"
         )) > 0
 
-    # ✅ Адаптивна перевірка (швидше за 3.2 сек)
-    def wait_services_adaptive(self, driver):
-        end1 = time.time() + FAST_WAIT_1
-        while time.time() < end1:
+    def wait_services_short(self, driver):
+        """
+        Быстрая проверка после 'Пошук':
+        ждем до WAIT_RESULT_SECONDS появления 'Реєстрація послуг'.
+        Если не появилось — считаем что нет.
+        """
+        end = time.time() + WAIT_RESULT_SECONDS
+        while time.time() < end:
             if self.has_services_button(driver):
                 return True
             time.sleep(POLL)
-
-        end2 = time.time() + FAST_WAIT_2
-        while time.time() < end2:
-            if self.has_services_button(driver):
-                return True
-            time.sleep(POLL)
-
         return False
 
     def click_start_pack(self, driver, timeout=5):
@@ -246,10 +235,9 @@ class App:
             self.root.after(0, lambda: self.btn_stop.configure(state="disabled"))
             return
 
-        remaining_retry = []
-        valid_buf = []
-        trash_buf = []
+        remaining_retry = []  # только те, что НЕ удалось обработать (ошибка/стоп)
 
+        # ✅ Ускоряем Chrome: eager + отключаем картинки/анимации
         options = webdriver.ChromeOptions()
         options.add_argument("--disable-notifications")
         options.add_argument("--start-maximized")
@@ -258,8 +246,8 @@ class App:
         options.add_argument("--disable-dev-shm-usage")
         options.page_load_strategy = "eager"
 
-        # ✅ КАРТИНКИ УВІМКНЕНІ (CAPTCHA OK) — прибрали images:2
         prefs = {
+            "profile.managed_default_content_settings.images": 2,      # no images
             "profile.default_content_setting_values.notifications": 2
         }
         options.add_experimental_option("prefs", prefs)
@@ -273,7 +261,7 @@ class App:
 
         try:
             driver.get(URL)
-            self.log("Очікую логін/2FA/капчу...")
+            self.log("Очікую логін/2FA...")
 
             wait_login.until(EC.presence_of_element_located((
                 By.XPATH,
@@ -296,21 +284,27 @@ class App:
                     self.set_number(driver, wait, number)
                     self.click_search(driver, wait)
 
-                    services_found = self.wait_services_adaptive(driver)
+                    services_found = self.wait_services_short(driver)
 
                     if services_found:
+                        # ✅ Новое требование: если "Реєстрація послуг" есть, но "Стартовий пакет" НЕТ — просто следующий номер
                         if not self.has_start_pack(driver):
-                            self.log("  ⚠ Є послуги, але нема стартового пакету → пропускаю")
-                            trash_buf.append(number)
+                            self.log("  ⚠ Є «Реєстрація послуг», але нема «Реєстрація стартового пакету» → пропускаю")
+                            with open(TRASH_FILE, "a", encoding="utf-8") as f:
+                                f.write(number + "\n")
                         else:
-                            self.log("  ✅ Є послуги + стартовий пакет → реєструю...")
+                            self.log("  ✅ Є «Реєстрація послуг» + «Стартовий пакет» → реєструю...")
                             self.click_start_pack(driver)
                             self.click_register(driver)
                             self.click_ok(driver)
-                            valid_buf.append(number)
+
+                            with open(VALID_FILE, "a", encoding="utf-8") as f:
+                                f.write(number + "\n")
                             self.log("  ✔ Зареєстровано (VALID)")
                     else:
-                        trash_buf.append(number)
+                        self.log("  ❓ Нема «Реєстрація послуг» → UNKNOWN/TRASH")
+                        with open(TRASH_FILE, "a", encoding="utf-8") as f:
+                            f.write(number + "\n")
 
                     self.back_to_home_and_open_client(driver)
 
@@ -322,9 +316,6 @@ class App:
                     except Exception:
                         pass
 
-            # ✅ Пишемо 1 раз в кінці (швидко)
-            append_lines(VALID_FILE, valid_buf)
-            append_lines(TRASH_FILE, trash_buf)
             save_numbers(remaining_retry)
 
         finally:
@@ -336,7 +327,7 @@ class App:
             self.root.after(0, lambda: self.status.set("Готово"))
             self.root.after(0, lambda: self.btn_start.configure(state="normal"))
             self.root.after(0, lambda: self.btn_stop.configure(state="disabled"))
-            self.log("Готово. valid.txt/trash.txt дописані, numbers.txt = тільки retry.")
+            self.log("Готово. Файли: valid.txt / trash.txt / numbers.txt (тільки retry).")
 
 
 if __name__ == "__main__":
