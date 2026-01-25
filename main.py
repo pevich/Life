@@ -15,35 +15,50 @@ URL = "https://my-ambassador.lifecell.ua"
 
 NUMBERS_FILE = "numbers.txt"
 VALID_FILE = "valid.txt"
-TRASH_FILE = "trash.txt"
 
 WAIT_LOGIN_SECONDS = 600
 WAIT_UI_SECONDS = 12
 
 POLL = 0.03
+SERVICES_MAX_WAIT = 3.0          # максимум ждать "Реєстрація послуг"
+SLEEP_BETWEEN_NUMBERS = 1.0      # пауза перед следующим номером
 
-# ✅ сколько максимум ждать появления "Реєстрація послуг"
-SERVICES_MAX_WAIT = 3.0  # можешь поставить 2.0 если надо быстрее
 
-# ✅ пауза перед следующим номером
-SLEEP_BETWEEN_NUMBERS = 1.0
+def parse_number_line(line: str):
+    """
+    ✅ Берём ТОЛЬКО:
+      - 9 цифр (пример: 935180140)
+      - или 12 цифр вида 380XXXXXXXXX → берём последние 9
+    ❌ Всё остальное (даты 01.01.2026, 01.01, текст, короткие числа) — игнорируем.
+    """
+    digits = re.sub(r"\D+", "", line.strip())
+    if not digits:
+        return None
+
+    # 380 + 9 digits
+    if len(digits) == 12 and digits.startswith("380"):
+        return digits[3:]
+
+    # exactly 9 digits
+    if len(digits) == 9:
+        return digits
+
+    # всё остальное пропускаем
+    return None
 
 
 def load_numbers():
     if not os.path.exists(NUMBERS_FILE):
         return []
+
     out = []
     with open(NUMBERS_FILE, "r", encoding="utf-8") as f:
         for line in f:
-            s = re.sub(r"\D+", "", line.strip())
-            if not s:
-                continue
-            if len(s) == 9:
-                out.append(s)
-            elif s.startswith("380") and len(s) == 12:
-                out.append(s[3:])
-            else:
-                out.append(s)
+            n = parse_number_line(line)
+            if n:
+                out.append(n)
+
+    # убрать дубли, сохранить порядок
     return list(dict.fromkeys(out))
 
 
@@ -65,10 +80,10 @@ class App:
     def __init__(self, root):
         self.root = root
         self.root.title("Lifecell Checker")
-        self.root.geometry("820x520")
+        self.root.geometry("860x560")
 
         self.status = tk.StringVar(value="Готово")
-        self.progress = tk.StringVar(value="0 / 0")
+        self.progress_text = tk.StringVar(value="0 / 0")
 
         self.stop_event = threading.Event()
         self.worker = None
@@ -78,10 +93,14 @@ class App:
         bar = ttk.Frame(root)
         bar.pack(fill="x", padx=14, pady=4)
         ttk.Label(bar, textvariable=self.status).pack(side="left")
-        ttk.Label(bar, textvariable=self.progress).pack(side="right")
+        ttk.Label(bar, textvariable=self.progress_text).pack(side="right")
+
+        # ✅ Progressbar
+        self.pbar = ttk.Progressbar(root, orient="horizontal", mode="determinate", maximum=100)
+        self.pbar.pack(fill="x", padx=14, pady=(6, 0))
 
         btns = ttk.Frame(root)
-        btns.pack(fill="x", padx=14, pady=6)
+        btns.pack(fill="x", padx=14, pady=10)
         self.btn_start = ttk.Button(btns, text="▶ Почати", command=self.start)
         self.btn_start.pack(side="left")
         self.btn_stop = ttk.Button(btns, text="⏹ Стоп", command=self.stop, state="disabled")
@@ -98,6 +117,18 @@ class App:
             self.log_box.see("end")
             self.log_box.configure(state="disabled")
         self.root.after(0, _append)
+
+    def ui_set_status(self, text):
+        self.root.after(0, lambda: self.status.set(text))
+
+    def ui_set_progress(self, i, total):
+        def _upd():
+            self.progress_text.set(f"{i} / {total}")
+            if total > 0:
+                self.pbar["value"] = (i / total) * 100.0
+            else:
+                self.pbar["value"] = 0
+        self.root.after(0, _upd)
 
     def start(self):
         if self.worker and self.worker.is_alive():
@@ -159,17 +190,15 @@ class App:
         return self.wait_msisdn_ready(driver)
 
     def set_number_safe(self, driver, wait, number):
-        """
-        ✅ фикс "вводит 2 номера": чистим поле нормально + ставим значение через JS
-        """
         inp = wait.until(EC.element_to_be_clickable((By.ID, "msisdn")))
         full = "380" + number
 
+        # ✅ чистим поле чтобы не склеивались номера
         try:
             inp.click()
             inp.send_keys(Keys.CONTROL, "a")
             inp.send_keys(Keys.BACKSPACE)
-            time.sleep(0.10)
+            time.sleep(0.1)
         except Exception:
             pass
 
@@ -188,6 +217,9 @@ class App:
             inp, full
         )
 
+        # ✅ микропаузка чтобы UI успел принять ввод
+        time.sleep(0.15)
+
     def click_search(self, driver, wait):
         btn = wait.until(EC.element_to_be_clickable((
             By.XPATH, "//button[.//span[contains(@class,'mat-button-wrapper') and normalize-space(.)='Пошук']]"
@@ -200,12 +232,11 @@ class App:
             "//div[contains(@class,'content')][.//div[contains(@class,'label') and normalize-space(.)='Реєстрація послуг']]"
         ))
 
-    def wait_services_only(self, driver):
-        """
-        ✅ Ждём ТОЛЬКО "Реєстрація послуг", но НЕ дольше SERVICES_MAX_WAIT
-        """
+    def wait_services_only(self, driver, current_number):
         end = time.time() + SERVICES_MAX_WAIT
         while time.time() < end:
+            remaining = max(0.0, end - time.time())
+            self.ui_set_status(f"380{current_number} | Перевірка… ще {remaining:.1f}с")
             if self.has_services_button(driver):
                 return True
             time.sleep(POLL)
@@ -241,30 +272,30 @@ class App:
     def run(self):
         numbers = load_numbers()
         if not numbers:
-            self.root.after(0, lambda: messagebox.showerror("Помилка", "numbers.txt порожній або не знайдено."))
+            self.root.after(0, lambda: messagebox.showerror(
+                "Помилка",
+                "numbers.txt порожній або не містить валідних номерів.\n"
+                "Підходить тільки 9 цифр або 380XXXXXXXXX."
+            ))
             self.root.after(0, lambda: self.btn_start.configure(state="normal"))
             self.root.after(0, lambda: self.btn_stop.configure(state="disabled"))
             return
 
-        remaining_retry = []
+        remaining_numbers = list(numbers)  # удаляем только успешно зарегистрированные
         valid_buf = []
-        trash_buf = []
 
         options = webdriver.ChromeOptions()
         options.add_argument("--disable-notifications")
         options.add_argument("--start-maximized")
         options.page_load_strategy = "eager"
-
-        # CAPTCHA OK: картинки включены
-        prefs = {"profile.default_content_setting_values.notifications": 2}
-        options.add_experimental_option("prefs", prefs)
+        options.add_experimental_option("prefs", {"profile.default_content_setting_values.notifications": 2})
 
         driver = webdriver.Chrome(options=options)
         wait_login = WebDriverWait(driver, WAIT_LOGIN_SECONDS, poll_frequency=POLL)
 
         total = len(numbers)
-        self.root.after(0, lambda: self.progress.set(f"0 / {total}"))
-        self.root.after(0, lambda: self.status.set("Відкриваю сайт..."))
+        self.ui_set_progress(0, total)
+        self.ui_set_status("Відкриваю сайт...")
 
         try:
             driver.get(URL)
@@ -278,11 +309,10 @@ class App:
 
             for i, number in enumerate(numbers, 1):
                 if self.stop_event.is_set():
-                    remaining_retry.extend(numbers[i-1:])
                     break
 
-                self.root.after(0, lambda i=i, total=total: self.progress.set(f"{i} / {total}"))
-                self.root.after(0, lambda n=number: self.status.set(f"380{n}"))
+                self.ui_set_progress(i, total)
+                self.ui_set_status(f"380{number}")
                 self.log(f"→ 380{number}")
 
                 try:
@@ -291,29 +321,28 @@ class App:
                     self.set_number_safe(driver, wait, number)
                     self.click_search(driver, wait)
 
-                    services_found = self.wait_services_only(driver)
+                    services_found = self.wait_services_only(driver, number)
 
                     if services_found:
-                        # если есть "послуги" — делаем действия
-                        self.log("  ✅ Є «Реєстрація послуг» → роблю реєстрацію...")
+                        self.log("  ✅ Є «Реєстрація послуг» → реєструю...")
                         self.click_start_pack(driver)
                         time.sleep(0.2)
                         self.click_register(driver)
                         self.click_ok(driver)
+
                         valid_buf.append(number)
+                        if number in remaining_numbers:
+                            remaining_numbers.remove(number)
+
                         self.log("  ✔ Зареєстровано (VALID)")
                     else:
-                        # если нет "послуги" — пропускаем
-                        trash_buf.append(number)
+                        self.log("  ⏭ Нема «Реєстрація послуг» (пропуск)")
 
                     self.back_to_home_and_open_client(driver)
-
-                    # ✅ пауза 1 сек перед следующим номером
                     time.sleep(SLEEP_BETWEEN_NUMBERS)
 
                 except Exception as e:
                     self.log(f"  ⚠ Помилка: {type(e).__name__}")
-                    remaining_retry.append(number)
                     try:
                         self.back_to_home_and_open_client(driver)
                     except Exception:
@@ -321,8 +350,7 @@ class App:
                     time.sleep(SLEEP_BETWEEN_NUMBERS)
 
             append_lines(VALID_FILE, valid_buf)
-            append_lines(TRASH_FILE, trash_buf)
-            save_numbers(remaining_retry)
+            save_numbers(remaining_numbers)
 
         finally:
             try:
@@ -330,10 +358,10 @@ class App:
             except Exception:
                 pass
 
-            self.root.after(0, lambda: self.status.set("Готово"))
+            self.ui_set_status("Готово")
             self.root.after(0, lambda: self.btn_start.configure(state="normal"))
             self.root.after(0, lambda: self.btn_stop.configure(state="disabled"))
-            self.log("Готово. valid.txt/trash.txt дописані, numbers.txt = тільки retry.")
+            self.log("Готово. numbers.txt оновлено (видалено тільки VALID), valid.txt дописано.")
 
 
 if __name__ == "__main__":
