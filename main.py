@@ -19,7 +19,7 @@ TRASH_FILE = "trash.txt"
 WAIT_LOGIN_SECONDS = 600
 WAIT_UI_SECONDS = 12
 
-# ✅ Ускорение проверки
+# ✅ ускорение проверки после "Пошук"
 POLL = 0.02
 FAST_WAIT_1 = 0.25
 FAST_WAIT_2 = 0.55
@@ -139,6 +139,7 @@ class App:
         return False
 
     def back_to_home_and_open_client(self, driver):
+        # ✅ оставляем твою логику возврата
         for _ in range(5):
             if driver.find_elements(By.ID, "msisdn"):
                 return self.wait_msisdn_ready(driver)
@@ -178,12 +179,21 @@ class App:
         )))
         self.js_click(driver, btn)
 
+    # ✅ Проверка "Реєстрація послуг"
     def has_services_button(self, driver):
-        return len(driver.find_elements(
+        return bool(driver.find_elements(
             By.XPATH,
             "//div[contains(@class,'content')][.//div[contains(@class,'label') and normalize-space(.)='Реєстрація послуг']]"
-        )) > 0
+        ))
 
+    # ✅ Проверка "Реєстрація стартового пакету"
+    def has_start_pack(self, driver):
+        return bool(driver.find_elements(
+            By.XPATH,
+            "//div[contains(@class,'content')][.//div[contains(@class,'label') and normalize-space(.)='Реєстрація стартового пакету']]"
+        ))
+
+    # ✅ Быстрое ожидание "послуг"
     def wait_services_adaptive(self, driver):
         end1 = time.time() + FAST_WAIT_1
         while time.time() < end1:
@@ -199,7 +209,7 @@ class App:
 
         return False
 
-    def click_start_pack(self, driver, timeout=8):
+    def click_start_pack(self, driver, timeout=6):
         el = WebDriverWait(driver, timeout, poll_frequency=POLL).until(
             EC.element_to_be_clickable((
                 By.XPATH,
@@ -208,7 +218,7 @@ class App:
         )
         self.js_click(driver, el)
 
-    def click_register(self, driver, timeout=8):
+    def click_register(self, driver, timeout=6):
         btn = WebDriverWait(driver, timeout, poll_frequency=POLL).until(
             EC.element_to_be_clickable((
                 By.XPATH, "//button[.//span[contains(@class,'mat-button-wrapper') and normalize-space(.)='Зареєструвати']]"
@@ -216,7 +226,7 @@ class App:
         )
         self.js_click(driver, btn)
 
-    def click_ok(self, driver, timeout=8):
+    def click_ok(self, driver, timeout=6):
         btn = WebDriverWait(driver, timeout, poll_frequency=POLL).until(
             EC.element_to_be_clickable((
                 By.XPATH, "//button[.//span[contains(@class,'mat-button-wrapper') and normalize-space(.)='Ок']]"
@@ -243,9 +253,8 @@ class App:
         options.add_argument("--start-maximized")
         options.page_load_strategy = "eager"
 
-        prefs = {
-            "profile.default_content_setting_values.notifications": 2
-        }
+        # ✅ CAPTCHA OK: картинки НЕ отключаем
+        prefs = {"profile.default_content_setting_values.notifications": 2}
         options.add_experimental_option("prefs", prefs)
 
         driver = webdriver.Chrome(options=options)
@@ -283,13 +292,18 @@ class App:
                     services_found = self.wait_services_adaptive(driver)
 
                     if services_found:
-                        self.log("  ✅ Є «Реєстрація послуг» → Старт.пакет → Зареєструвати → Ок")
-                        self.click_start_pack(driver)
-                        time.sleep(0.2)
-                        self.click_register(driver)
-                        self.click_ok(driver)
-                        valid_buf.append(number)
-                        self.log("  ✔ Зареєстровано (VALID)")
+                        # ✅ КЛЮЧЕВОЕ ИСПРАВЛЕНИЕ: если старт-пакета нет — НЕ ждём, сразу следующий
+                        if not self.has_start_pack(driver):
+                            trash_buf.append(number)
+                            self.log("  ⚠ Є «Реєстрація послуг», але нема «Реєстрація стартового пакету» → пропускаю")
+                        else:
+                            self.log("  ✅ Є послуги + стартовий пакет → реєструю...")
+                            self.click_start_pack(driver)
+                            time.sleep(0.2)
+                            self.click_register(driver)
+                            self.click_ok(driver)
+                            valid_buf.append(number)
+                            self.log("  ✔ Зареєстровано (VALID)")
                     else:
                         trash_buf.append(number)
 
@@ -303,6 +317,7 @@ class App:
                     except Exception:
                         pass
 
+            # ✅ Быстро: пишем 1 раз в конце
             append_lines(VALID_FILE, valid_buf)
             append_lines(TRASH_FILE, trash_buf)
             save_numbers(remaining_retry)
