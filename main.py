@@ -21,17 +21,6 @@ WAIT_UI_SECONDS = 12
 POLL = 0.03
 
 
-def fmt_seconds(sec: float) -> str:
-    sec = max(0, int(round(sec)))
-    m, s = divmod(sec, 60)
-    h, m = divmod(m, 60)
-    if h > 0:
-        return f"{h}г {m}хв"
-    if m > 0:
-        return f"{m}хв {s}с"
-    return f"{s}с"
-
-
 def parse_number_line(line: str):
     m = re.search(r"(380\d{9}|\b\d{9}\b)", line)
     if not m:
@@ -70,26 +59,23 @@ class App:
     def __init__(self, root):
         self.root = root
         self.root.title("Lifecell Checker")
-        self.root.geometry("980x670")
+        self.root.geometry("950x650")
 
         self.status = tk.StringVar(value="Готово")
         self.progress_text = tk.StringVar(value="0 / 0")
-        self.speed_text = tk.StringVar(value="Середній: - | Залишилось: -")
         self.count_text = tk.StringVar(value="Зареєстровано: 0 | Пропущено: 0")
 
-        self.mode = tk.StringVar(value="speed")   # speed / accuracy / custom
-        self.wait_seconds = tk.DoubleVar(value=2.0)
+        self.mode = tk.StringVar(value="speed")
+        self.speed_seconds = tk.DoubleVar(value=2.0)
+        self.accuracy_seconds = tk.DoubleVar(value=5.0)
+        self.custom_seconds = tk.DoubleVar(value=3.0)
         self.pause_seconds = tk.DoubleVar(value=1.0)
-        self.test_only = tk.BooleanVar(value=False)
-        self.beep_on_valid = tk.BooleanVar(value=False)
-        self.autosave_every = tk.IntVar(value=10)
 
         self.stop_event = threading.Event()
         self.worker = None
 
         self.valid_count = 0
         self.skipped_count = 0
-        self.run_started_at = None
 
         ttk.Label(root, text="Lifecell Checker", font=("Segoe UI", 18, "bold")).pack(pady=10)
 
@@ -98,10 +84,6 @@ class App:
         ttk.Label(bar, textvariable=self.status).pack(side="left")
         ttk.Label(bar, textvariable=self.progress_text).pack(side="right")
 
-        info = ttk.Frame(root)
-        info.pack(fill="x", padx=14, pady=(0, 2))
-        ttk.Label(info, textvariable=self.speed_text).pack(side="left")
-
         cnt = ttk.Frame(root)
         cnt.pack(fill="x", padx=14, pady=(0, 6))
         ttk.Label(cnt, textvariable=self.count_text).pack(side="left")
@@ -109,29 +91,28 @@ class App:
         self.pbar = ttk.Progressbar(root, orient="horizontal", mode="determinate", maximum=100)
         self.pbar.pack(fill="x", padx=14, pady=(0, 10))
 
-        opt = ttk.LabelFrame(root, text="Налаштування")
+        opt = ttk.LabelFrame(root, text="Час очікування 'Реєстрація послуг'")
         opt.pack(fill="x", padx=14, pady=(0, 10))
 
         row1 = ttk.Frame(opt)
         row1.pack(fill="x", padx=10, pady=6)
-        ttk.Label(row1, text="Режим:").pack(side="left")
-        ttk.Radiobutton(row1, text="Швидкість (2с)", value="speed", variable=self.mode).pack(side="left", padx=8)
-        ttk.Radiobutton(row1, text="Точність (5с)", value="accuracy", variable=self.mode).pack(side="left", padx=8)
-        ttk.Radiobutton(row1, text="Кастом", value="custom", variable=self.mode).pack(side="left", padx=8)
-        ttk.Label(row1, text="Чекати (сек):").pack(side="left", padx=(18, 4))
-        ttk.Entry(row1, width=6, textvariable=self.wait_seconds).pack(side="left")
+
+        ttk.Radiobutton(row1, text="Швидко", variable=self.mode, value="speed").pack(side="left")
+        ttk.Entry(row1, width=6, textvariable=self.speed_seconds).pack(side="left", padx=5)
+        ttk.Label(row1, text="сек").pack(side="left", padx=8)
+
+        ttk.Radiobutton(row1, text="Надійно", variable=self.mode, value="accuracy").pack(side="left", padx=(20, 0))
+        ttk.Entry(row1, width=6, textvariable=self.accuracy_seconds).pack(side="left", padx=5)
+        ttk.Label(row1, text="сек").pack(side="left", padx=8)
+
+        ttk.Radiobutton(row1, text="Кастом", variable=self.mode, value="custom").pack(side="left", padx=(20, 0))
+        ttk.Entry(row1, width=6, textvariable=self.custom_seconds).pack(side="left", padx=5)
+        ttk.Label(row1, text="сек").pack(side="left", padx=8)
 
         row2 = ttk.Frame(opt)
         row2.pack(fill="x", padx=10, pady=6)
         ttk.Label(row2, text="Пауза між номерами (сек):").pack(side="left")
         ttk.Entry(row2, width=6, textvariable=self.pause_seconds).pack(side="left", padx=6)
-        ttk.Checkbutton(row2, text="Тільки перевірка", variable=self.test_only).pack(side="left", padx=14)
-        ttk.Checkbutton(row2, text="Beep на VALID", variable=self.beep_on_valid).pack(side="left", padx=14)
-
-        row3 = ttk.Frame(opt)
-        row3.pack(fill="x", padx=10, pady=(0, 8))
-        ttk.Label(row3, text="Автозбереження кожні N номерів:").pack(side="left")
-        ttk.Entry(row3, width=6, textvariable=self.autosave_every).pack(side="left", padx=6)
 
         btns = ttk.Frame(root)
         btns.pack(fill="x", padx=14, pady=6)
@@ -152,18 +133,10 @@ class App:
             self.log_box.configure(state="disabled")
         self.root.after(0, _append)
 
-    def ui_set_status(self, text):
-        self.root.after(0, lambda: self.status.set(text))
-
     def ui_set_progress(self, i, total):
         def _upd():
             self.progress_text.set(f"{i} / {total}")
             self.pbar["value"] = (i / total) * 100.0 if total else 0
-        self.root.after(0, _upd)
-
-    def ui_set_speed_eta(self, avg_sec, eta_sec):
-        def _upd():
-            self.speed_text.set(f"Середній: {avg_sec:.2f}с/номер | Залишилось: ~{fmt_seconds(eta_sec)}")
         self.root.after(0, _upd)
 
     def ui_set_counts(self):
@@ -171,19 +144,19 @@ class App:
             f"Зареєстровано: {self.valid_count} | Пропущено: {self.skipped_count}"
         ))
 
-    def get_services_wait(self) -> float:
-        if self.mode.get() == "speed":
-            return 2.0
-        if self.mode.get() == "accuracy":
-            return 5.0
+    def get_services_wait(self):
         try:
-            return max(0.3, float(self.wait_seconds.get()))
+            if self.mode.get() == "speed":
+                return float(self.speed_seconds.get())
+            if self.mode.get() == "accuracy":
+                return float(self.accuracy_seconds.get())
+            return float(self.custom_seconds.get())
         except Exception:
             return 3.0
 
-    def get_pause(self) -> float:
+    def get_pause(self):
         try:
-            return max(0.0, float(self.pause_seconds.get()))
+            return float(self.pause_seconds.get())
         except Exception:
             return 1.0
 
@@ -193,7 +166,6 @@ class App:
         self.stop_event.clear()
         self.btn_start.configure(state="disabled")
         self.btn_stop.configure(state="normal")
-        self.run_started_at = time.time()
         self.valid_count = 0
         self.skipped_count = 0
         self.ui_set_counts()
@@ -227,11 +199,19 @@ class App:
         return wait
 
     def back_to_home_and_open_client(self, driver):
-        for _ in range(5):
+        # 1) если поле уже есть — работаем
+        if driver.find_elements(By.ID, "msisdn"):
+            return self.wait_msisdn_ready(driver)
+
+        # 2) если нет — жмём "Назад" один раз
+        backs = driver.find_elements(By.XPATH, "//button[.//mat-icon[normalize-space(text())='arrow_back']]")
+        if backs:
+            self.js_click(driver, backs[0])
+            time.sleep(0.2)
             if driver.find_elements(By.ID, "msisdn"):
                 return self.wait_msisdn_ready(driver)
-            self.click_client(driver)
-            return self.wait_msisdn_ready(driver)
+
+        # 3) если всё ещё нет — жмём "Клієнт"
         self.click_client(driver)
         return self.wait_msisdn_ready(driver)
 
@@ -271,15 +251,15 @@ class App:
             "//div[contains(@class,'content')][.//div[contains(@class,'label') and normalize-space(.)='Реєстрація послуг']]"
         ))
 
-    def wait_services_only(self, driver, current_number, wait_seconds):
+    def wait_services_only(self, driver, wait_seconds):
         end = time.time() + wait_seconds
         while time.time() < end:
-            remaining = max(0.0, end - time.time())
-            self.ui_set_status(f"380{current_number} | Перевірка… ще {remaining:.1f}с")
             if self.has_services_button(driver):
                 return True
             time.sleep(POLL)
         return False
+
+    # ---------- MAIN ----------
 
     def run(self):
         numbers = load_numbers()
@@ -316,11 +296,12 @@ class App:
                 self.set_number_safe(driver, wait, number)
                 self.click_search(driver, wait)
 
-                if self.wait_services_only(driver, number, wait_seconds):
+                if self.wait_services_only(driver, wait_seconds):
                     self.valid_count += 1
                     self.ui_set_counts()
                     valid_buf.append(number)
-                    remaining_numbers.remove(number)
+                    if number in remaining_numbers:
+                        remaining_numbers.remove(number)
                 else:
                     self.skipped_count += 1
                     self.ui_set_counts()
@@ -332,7 +313,7 @@ class App:
 
         finally:
             driver.quit()
-            self.ui_set_status("Готово")
+            self.status.set("Готово")
             self.btn_start.configure(state="normal")
             self.btn_stop.configure(state="disabled")
             self.log("Готово.")
