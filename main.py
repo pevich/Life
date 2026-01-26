@@ -22,6 +22,7 @@ POLL = 0.03
 
 
 def parse_number_line(line: str):
+    # 935180140- Максі 26.12  -> 935180140
     m = re.search(r"(380\d{9}|\b\d{9}\b)", line)
     if not m:
         return None
@@ -66,7 +67,7 @@ class App:
         self.count_text = tk.StringVar(value="Зареєстровано: 0 | Пропущено: 0")
 
         self.mode = tk.StringVar(value="speed")
-        self.speed_seconds = tk.DoubleVar(value=2.0)
+        self.speed_seconds = tk.DoubleVar(value=3.0)     # ✅ ШВИДКО = 3с
         self.accuracy_seconds = tk.DoubleVar(value=5.0)
         self.custom_seconds = tk.DoubleVar(value=3.0)
         self.pause_seconds = tk.DoubleVar(value=1.0)
@@ -199,20 +200,27 @@ class App:
         return wait
 
     def back_to_home_and_open_client(self, driver):
-        # 1) если поле уже есть — работаем
+        """
+        ✅ ТВОЯ ЛОГІКА:
+        1) якщо msisdn є — працюємо
+        2) якщо нема — 1 раз "Назад"
+        3) якщо після "Назад" msisdn є — працюємо
+        4) якщо нема — 1 раз "Клієнт"
+        """
         if driver.find_elements(By.ID, "msisdn"):
             return self.wait_msisdn_ready(driver)
 
-        # 2) если нет — жмём "Назад" один раз
         backs = driver.find_elements(By.XPATH, "//button[.//mat-icon[normalize-space(text())='arrow_back']]")
         if backs:
             self.js_click(driver, backs[0])
-            time.sleep(0.2)
-            if driver.find_elements(By.ID, "msisdn"):
+            time.sleep(0.4)  # ✅ дать UI обновиться
+            try:
                 return self.wait_msisdn_ready(driver)
+            except Exception:
+                pass
 
-        # 3) если всё ещё нет — жмём "Клієнт"
         self.click_client(driver)
+        time.sleep(0.4)
         return self.wait_msisdn_ready(driver)
 
     def set_number_safe(self, driver, wait, number):
@@ -265,6 +273,8 @@ class App:
         numbers = load_numbers()
         if not numbers:
             messagebox.showerror("Помилка", "numbers.txt не містить валідних номерів")
+            self.btn_start.configure(state="normal")
+            self.btn_stop.configure(state="disabled")
             return
 
         remaining_numbers = list(numbers)
@@ -273,7 +283,13 @@ class App:
         wait_seconds = self.get_services_wait()
         pause = self.get_pause()
 
-        driver = webdriver.Chrome()
+        options = webdriver.ChromeOptions()
+        options.add_argument("--disable-notifications")
+        options.add_argument("--start-maximized")
+        options.page_load_strategy = "eager"
+        options.add_experimental_option("prefs", {"profile.default_content_setting_values.notifications": 2})
+
+        driver = webdriver.Chrome(options=options)
         wait_login = WebDriverWait(driver, WAIT_LOGIN_SECONDS, poll_frequency=POLL)
 
         total = len(numbers)
@@ -281,30 +297,42 @@ class App:
 
         try:
             driver.get(URL)
+            self.log("Очікую логін/2FA/капчу...")
+
             wait_login.until(EC.presence_of_element_located((By.XPATH,
                 "//div[contains(@class,'content')][.//div[contains(@class,'label') and normalize-space(.)='Клієнт']]"
             )))
+            self.log("Авторизація OK")
 
             for i, number in enumerate(numbers, 1):
                 if self.stop_event.is_set():
                     break
 
                 self.ui_set_progress(i, total)
+                self.status.set(f"380{number}")
                 self.log(f"→ 380{number}")
 
-                wait = self.back_to_home_and_open_client(driver)
-                self.set_number_safe(driver, wait, number)
-                self.click_search(driver, wait)
+                try:
+                    wait = self.back_to_home_and_open_client(driver)
+                    self.set_number_safe(driver, wait, number)
+                    self.click_search(driver, wait)
 
-                if self.wait_services_only(driver, wait_seconds):
-                    self.valid_count += 1
-                    self.ui_set_counts()
-                    valid_buf.append(number)
-                    if number in remaining_numbers:
-                        remaining_numbers.remove(number)
-                else:
+                    if self.wait_services_only(driver, wait_seconds):
+                        self.valid_count += 1
+                        self.ui_set_counts()
+                        valid_buf.append(number)
+                        if number in remaining_numbers:
+                            remaining_numbers.remove(number)
+                        self.log("  ✔ VALID (є «Реєстрація послуг»)")
+                    else:
+                        self.skipped_count += 1
+                        self.ui_set_counts()
+                        self.log("  ⏭ пропуск (нема «Реєстрація послуг»)")
+
+                except Exception as e:
                     self.skipped_count += 1
                     self.ui_set_counts()
+                    self.log(f"  ⚠ Помилка: {type(e).__name__} (пропуск)")
 
                 time.sleep(pause)
 
@@ -312,11 +340,14 @@ class App:
             save_numbers(remaining_numbers)
 
         finally:
-            driver.quit()
+            try:
+                driver.quit()
+            except Exception:
+                pass
             self.status.set("Готово")
             self.btn_start.configure(state="normal")
             self.btn_stop.configure(state="disabled")
-            self.log("Готово.")
+            self.log("Готово. numbers.txt оновлено (видалено тільки VALID), valid.txt дописано.")
 
 
 if __name__ == "__main__":
