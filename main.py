@@ -120,7 +120,7 @@ class App:
     def __init__(self, root):
         self.root = root
         self.root.title("Lifecell Checker")
-        self.root.geometry("1080x800")
+        self.root.geometry("1080x820")
 
         self.status = tk.StringVar(value="Готово")
         self.progress_text = tk.StringVar(value="0 / 0")
@@ -135,8 +135,8 @@ class App:
 
         # режими очікування "Реєстрація послуг"
         self.mode = tk.StringVar(value="speed")
-        self.speed_seconds = tk.DoubleVar(value=2.0)     # ✅ швидко = 2с
-        self.accuracy_seconds = tk.DoubleVar(value=4.0)  # ✅ надійно = 4с
+        self.speed_seconds = tk.DoubleVar(value=2.0)     # швидко = 2с
+        self.accuracy_seconds = tk.DoubleVar(value=4.0)  # надійно = 4с
         self.custom_seconds = tk.DoubleVar(value=2.0)
 
         # пауза між номерами
@@ -377,6 +377,31 @@ class App:
         )))
         self.js_click(driver, btn)
 
+    # ✅ НОВЕ: екран "Помилка" -> натиснути Ок
+    def has_error_screen(self, driver):
+        return bool(driver.find_elements(By.XPATH, "//h1[normalize-space(.)='Помилка']"))
+
+    def handle_error_screen(self, driver):
+        """
+        Якщо є екран 'Помилка' — натискаємо Ок і повертаємось.
+        Повертає True якщо помилку обробили.
+        """
+        if self.has_error_screen(driver):
+            self.log("  ⚠ Виявлено екран «Помилка» → натискаю Ок")
+            try:
+                btn = WebDriverWait(driver, 3, poll_frequency=POLL).until(
+                    EC.element_to_be_clickable((
+                        By.XPATH,
+                        "//button[.//span[normalize-space(.)='Ок']]"
+                    ))
+                )
+                self.js_click(driver, btn)
+                time.sleep(0.4)
+            except Exception:
+                pass
+            return True
+        return False
+
     def has_services_button(self, driver):
         return bool(driver.find_elements(By.XPATH,
             "//div[contains(@class,'content')][.//div[contains(@class,'label') and normalize-space(.)='Реєстрація послуг']]"
@@ -437,14 +462,14 @@ class App:
     def run(self):
         lines, items = load_lines_with_numbers(NUMBERS_FILE)
         if not items:
-            messagebox.showerror("Помилка", "numbers.txt не містить жодного валідного номера (9 цифр)")
+            messagebox.showerror("Помилка", "numbers.txt не містить жодного валідного номера")
             self.btn_start.configure(state="normal")
             self.btn_stop.configure(state="disabled")
             return
 
         items_iter = list(reversed(items)) if self.order.get() == "end" else list(items)
 
-        to_delete_numbers = set()  # VALID + already registered
+        to_delete_numbers = set()
         valid_buf = []
 
         wait_seconds = self.get_services_wait()
@@ -488,6 +513,16 @@ class App:
                     self.set_number_safe(driver, wait, number)
                     self.click_search(driver, wait)
 
+                    # ✅ НОВЕ: якщо з'явилась "Помилка" — натиснути Ок і пропустити номер
+                    if self.handle_error_screen(driver):
+                        self.skipped_count += 1
+                        self.ui_set_counts()
+                        self.log("  ⏭ Пропуск через екран «Помилка»")
+                        time.sleep(pause)
+                        self.done_count += 1
+                        self.ui_update_eta()
+                        continue
+
                     services = self.wait_services_only(driver, wait_seconds)
 
                     if not services:
@@ -495,7 +530,6 @@ class App:
                         self.ui_set_counts()
                         self.log("  ⏭ пропуск (нема «Реєстрація послуг») — рядок лишається")
                     else:
-                        # ✅ якщо є "Реєстрація послуг", але НЕМА "Реєстрація стартового пакету" -> пропуск
                         if not self.has_start_pack_button(driver):
                             self.skipped_count += 1
                             self.ui_set_counts()
@@ -513,13 +547,13 @@ class App:
                                 self.already_count += 1
                                 self.ui_set_counts()
                                 to_delete_numbers.add(number)
-                                self.log("  🟡 Номер вже було зареєстровано → видалити номер з numbers.txt")
+                                self.log("  🟡 Номер вже було зареєстровано → видалити з numbers.txt")
                             else:
                                 self.valid_count += 1
                                 self.ui_set_counts()
                                 valid_buf.append(number)
                                 to_delete_numbers.add(number)
-                                self.log("  ✔ Зареєстровано (VALID) → видалити номер з numbers.txt")
+                                self.log("  ✔ Зареєстровано (VALID) → видалити з numbers.txt")
 
                 except Exception as e:
                     self.skipped_count += 1
@@ -532,7 +566,6 @@ class App:
 
             append_lines(VALID_FILE, valid_buf)
 
-            # перезаписуємо numbers.txt:
             new_lines = []
             for ln in lines:
                 num = extract_number_from_line(ln)
@@ -540,10 +573,8 @@ class App:
                     if self.keep_non_numbers.get():
                         new_lines.append(ln)
                     continue
-
                 if num in to_delete_numbers:
                     continue
-
                 new_lines.append(ln)
 
             with open(NUMBERS_FILE, "w", encoding="utf-8") as f:
