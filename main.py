@@ -20,52 +20,35 @@ WAIT_LOGIN_SECONDS = 600
 WAIT_UI_SECONDS = 12
 POLL = 0.03
 
+ERROR_POLL_SECONDS = 1.0  # ✅ кожну 1 секунду перевіряємо "Помилка"
+
 
 # ---------- parsing helpers ----------
 
 def normalize_to_9_digits(raw_digits: str):
-    """
-    Повертає 9 цифр у форматі lifecell: 9XXXXXXXX (без 380).
-    Приймає:
-      - 935180140
-      - 0935180140 -> 935180140
-      - 380935180140 -> 935180140
-    """
     d = re.sub(r"\D+", "", raw_digits or "")
     if not d:
         return None
-
     if d.startswith("380") and len(d) == 12:
         return d[3:]
-
-    # 0 + 9 цифр (наприклад 0935180140)
     if d.startswith("0") and len(d) == 10:
         return d[1:]
-
-    # вже 9 цифр
     if len(d) == 9:
         return d
-
     return None
 
 
 def extract_number_from_line(line: str):
-    """
-    Дістає номер з рядка (різні формати) і повертає 9 цифр або None.
-    """
     digits = re.sub(r"\D+", "", line)
 
-    # 380XXXXXXXXX (12)
     m = re.search(r"380\d{9}", digits)
     if m:
         return normalize_to_9_digits(m.group(0))
 
-    # 0XXXXXXXXX (10)
     m = re.search(r"0\d{9}", digits)
     if m:
         return normalize_to_9_digits(m.group(0))
 
-    # 9 цифр
     m = re.search(r"\b\d{9}\b", line)
     if m:
         return normalize_to_9_digits(m.group(0))
@@ -74,11 +57,6 @@ def extract_number_from_line(line: str):
 
 
 def load_lines_with_numbers(path: str):
-    """
-    lines: список рядків (без \n) як у файлі
-    items: список dict: {idx, line, number} лише для рядків з валідним номером
-    (дублі номерів прибираємо, беремо першу появу)
-    """
     if not os.path.exists(path):
         return [], []
     with open(path, "r", encoding="utf-8") as f:
@@ -127,29 +105,30 @@ class App:
         self.count_text = tk.StringVar(value="VALID: 0 | Пропущено: 0 | Уже зареєстровано: 0")
         self.eta_text = tk.StringVar(value="Середній: - | ETA: - | Пройшло: -")
 
-        # порядок
-        self.order = tk.StringVar(value="start")  # start / end
-
-        # зберігати рядки без номерів?
+        self.order = tk.StringVar(value="start")
         self.keep_non_numbers = tk.BooleanVar(value=True)
 
-        # режими очікування "Реєстрація послуг"
         self.mode = tk.StringVar(value="speed")
-        self.speed_seconds = tk.DoubleVar(value=2.0)     # швидко = 2с
-        self.accuracy_seconds = tk.DoubleVar(value=4.0)  # надійно = 4с
+        self.speed_seconds = tk.DoubleVar(value=2.0)
+        self.accuracy_seconds = tk.DoubleVar(value=4.0)
         self.custom_seconds = tk.DoubleVar(value=2.0)
 
-        # пауза між номерами
         self.pause_seconds = tk.DoubleVar(value=1.0)
 
         self.stop_event = threading.Event()
         self.worker = None
 
+        # ✅ блокування для одночасних дій з driver (важливо!)
+        self.driver_lock = threading.Lock()
+
+        # ✅ монітор "Помилка"
+        self.error_watch_stop = threading.Event()
+        self.error_watch_thread = None
+
         self.valid_count = 0
         self.skipped_count = 0
         self.already_count = 0
 
-        # для ETA
         self.run_started_at = None
         self.done_count = 0
         self.total_count = 0
@@ -305,6 +284,7 @@ class App:
     def stop(self):
         self.stop_event.set()
         self.status.set("Зупинка...")
+        self.error_watch_stop.set()
 
     # ---------- Selenium helpers ----------
 
@@ -377,31 +357,40 @@ class App:
         )))
         self.js_click(driver, btn)
 
-    # ✅ НОВЕ: екран "Помилка" -> натиснути Ок
+    # ✅ Помилка screen
     def has_error_screen(self, driver):
         return bool(driver.find_elements(By.XPATH, "//h1[normalize-space(.)='Помилка']"))
 
-    def handle_error_screen(self, driver):
-        """
-        Якщо є екран 'Помилка' — натискаємо Ок і повертаємось.
-        Повертає True якщо помилку обробили.
-        """
+    def click_ok_anywhere(self, driver, timeout=2):
+        btn = WebDriverWait(driver, timeout, poll_frequency=POLL).until(
+            EC.element_to_be_clickable((By.XPATH,
+                "//button[.//span[normalize-space(.)='Ок']]"
+            ))
+        )
+        self.js_click(driver, btn)
+
+    def handle_error_screen_once(self, driver):
         if self.has_error_screen(driver):
             self.log("  ⚠ Виявлено екран «Помилка» → натискаю Ок")
             try:
-                btn = WebDriverWait(driver, 3, poll_frequency=POLL).until(
-                    EC.element_to_be_clickable((
-                        By.XPATH,
-                        "//button[.//span[normalize-space(.)='Ок']]"
-                    ))
-                )
-                self.js_click(driver, btn)
-                time.sleep(0.4)
+                self.click_ok_anywhere(driver, timeout=2)
+                time.sleep(0.3)
             except Exception:
                 pass
             return True
         return False
 
+    # ✅ монітор, який кожну секунду прибирає "Помилка"
+    def error_watch_loop(self, driver):
+        while not self.error_watch_stop.is_set() and not self.stop_event.is_set():
+            try:
+                with self.driver_lock:
+                    self.handle_error_screen_once(driver)
+            except Exception:
+                pass
+            time.sleep(ERROR_POLL_SECONDS)
+
+    # services / start pack
     def has_services_button(self, driver):
         return bool(driver.find_elements(By.XPATH,
             "//div[contains(@class,'content')][.//div[contains(@class,'label') and normalize-space(.)='Реєстрація послуг']]"
@@ -437,12 +426,7 @@ class App:
         self.js_click(driver, btn)
 
     def click_ok(self, driver, timeout=8):
-        btn = WebDriverWait(driver, timeout, poll_frequency=POLL).until(
-            EC.element_to_be_clickable((By.XPATH,
-                "//button[.//span[contains(@class,'mat-button-wrapper') and normalize-space(.)='Ок']]"
-            ))
-        )
-        self.js_click(driver, btn)
+        self.click_ok_anywhere(driver, timeout=timeout)
 
     def has_already_registered_error(self, driver):
         return bool(driver.find_elements(By.XPATH,
@@ -499,6 +483,11 @@ class App:
             )))
             self.log("Авторизація OK")
 
+            # ✅ стартуємо монітор "Помилка"
+            self.error_watch_stop.clear()
+            self.error_watch_thread = threading.Thread(target=self.error_watch_loop, args=(driver,), daemon=True)
+            self.error_watch_thread.start()
+
             for i, it in enumerate(items_iter, 1):
                 if self.stop_event.is_set():
                     break
@@ -509,51 +498,45 @@ class App:
                 self.log(f"→ 380{number} | рядок: {it['line']}")
 
                 try:
-                    wait = self.back_to_home_and_open_client(driver)
-                    self.set_number_safe(driver, wait, number)
-                    self.click_search(driver, wait)
+                    with self.driver_lock:
+                        wait = self.back_to_home_and_open_client(driver)
+                        self.set_number_safe(driver, wait, number)
+                        self.click_search(driver, wait)
 
-                    # ✅ НОВЕ: якщо з'явилась "Помилка" — натиснути Ок і пропустити номер
-                    if self.handle_error_screen(driver):
-                        self.skipped_count += 1
-                        self.ui_set_counts()
-                        self.log("  ⏭ Пропуск через екран «Помилка»")
-                        time.sleep(pause)
-                        self.done_count += 1
-                        self.ui_update_eta()
-                        continue
+                        # ✅ миттєва перевірка одразу після пошуку
+                        self.handle_error_screen_once(driver)
 
-                    services = self.wait_services_only(driver, wait_seconds)
+                        services = self.wait_services_only(driver, wait_seconds)
 
-                    if not services:
-                        self.skipped_count += 1
-                        self.ui_set_counts()
-                        self.log("  ⏭ пропуск (нема «Реєстрація послуг») — рядок лишається")
-                    else:
-                        if not self.has_start_pack_button(driver):
+                        if not services:
                             self.skipped_count += 1
                             self.ui_set_counts()
-                            self.log("  ⏭ Є «Реєстрація послуг», але нема «Реєстрація стартового пакету» → пропуск")
+                            self.log("  ⏭ пропуск (нема «Реєстрація послуг») — рядок лишається")
                         else:
-                            self.log("  ✅ Є «Реєстрація послуг» + «Стартовий пакет» → Зареєструвати")
-                            self.click_start_pack(driver)
-                            time.sleep(0.2)
-                            self.click_register(driver)
-
-                            already = self.wait_already_error_short(driver, seconds=1.3)
-                            self.click_ok(driver)
-
-                            if already:
-                                self.already_count += 1
+                            if not self.has_start_pack_button(driver):
+                                self.skipped_count += 1
                                 self.ui_set_counts()
-                                to_delete_numbers.add(number)
-                                self.log("  🟡 Номер вже було зареєстровано → видалити з numbers.txt")
+                                self.log("  ⏭ Є «Реєстрація послуг», але нема «Реєстрація стартового пакету» → пропуск")
                             else:
-                                self.valid_count += 1
-                                self.ui_set_counts()
-                                valid_buf.append(number)
-                                to_delete_numbers.add(number)
-                                self.log("  ✔ Зареєстровано (VALID) → видалити з numbers.txt")
+                                self.log("  ✅ Є «Реєстрація послуг» + «Стартовий пакет» → Зареєструвати")
+                                self.click_start_pack(driver)
+                                time.sleep(0.2)
+                                self.click_register(driver)
+
+                                already = self.wait_already_error_short(driver, seconds=1.3)
+                                self.click_ok(driver)
+
+                                if already:
+                                    self.already_count += 1
+                                    self.ui_set_counts()
+                                    to_delete_numbers.add(number)
+                                    self.log("  🟡 Номер вже було зареєстровано → видалити з numbers.txt")
+                                else:
+                                    self.valid_count += 1
+                                    self.ui_set_counts()
+                                    valid_buf.append(number)
+                                    to_delete_numbers.add(number)
+                                    self.log("  ✔ Зареєстровано (VALID) → видалити з numbers.txt")
 
                 except Exception as e:
                     self.skipped_count += 1
@@ -582,10 +565,19 @@ class App:
                     f.write(ln + "\n")
 
         finally:
+            # ✅ зупиняємо монітор
+            self.error_watch_stop.set()
+            try:
+                if self.error_watch_thread and self.error_watch_thread.is_alive():
+                    self.error_watch_thread.join(timeout=2)
+            except Exception:
+                pass
+
             try:
                 driver.quit()
             except Exception:
                 pass
+
             self.status.set("Готово")
             self.btn_start.configure(state="normal")
             self.btn_stop.configure(state="disabled")
