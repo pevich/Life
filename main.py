@@ -18,11 +18,13 @@ VALID_FILE = "valid.txt"
 
 WAIT_LOGIN_SECONDS = 600
 WAIT_UI_SECONDS = 12
-POLL = 0.03
 
-ERROR_POLL_SECONDS = 1.0  # кожну 1 секунду перевіряємо "Помилка"
+# ✅ Тюнінг швидкості (менше пауз між перевірками DOM)
+POLL = 0.02
 
-# ✅ жорсткі режими (не змінюються в UI)
+ERROR_POLL_SECONDS = 1.0
+
+# ✅ жорсткі режими (не змінюються)
 SPEED_WAIT_SECONDS = 1.8
 ACCURACY_WAIT_SECONDS = 2.5
 
@@ -118,7 +120,7 @@ def fmt_duration(seconds: float) -> str:
 class App:
     def __init__(self, root):
         self.root = root
-        self.root.title("Lifecell Checker")
+        self.root.title("Firk")
         self.root.geometry("1100x860")
 
         self.status = tk.StringVar(value="Готово")
@@ -135,15 +137,13 @@ class App:
         # ✅ пауза дефолт 0.5
         self.pause_seconds = tk.DoubleVar(value=0.5)
 
-        # ✅ зберігати кожні N номерів (можна міняти)
+        # ✅ зберігати кожні N номерів
         self.save_every_n = tk.IntVar(value=20)
 
         self.stop_event = threading.Event()
         self.worker = None
 
-        # ✅ lock щоб монітор "Помилка" не конфліктував з основним потоком
         self.driver_lock = threading.Lock()
-
         self.error_watch_stop = threading.Event()
         self.error_watch_thread = None
 
@@ -155,7 +155,7 @@ class App:
         self.done_count = 0
         self.total_count = 0
 
-        ttk.Label(root, text="Lifecell Checker", font=("Segoe UI", 18, "bold")).pack(pady=10)
+        ttk.Label(root, text="Firk", font=("Segoe UI", 18, "bold")).pack(pady=10)
 
         bar = ttk.Frame(root)
         bar.pack(fill="x", padx=14, pady=4)
@@ -209,9 +209,8 @@ class App:
         row3 = ttk.Frame(opt)
         row3.pack(fill="x", padx=10, pady=6)
         ttk.Label(row3, text="Зберігати прогрес кожні N номерів:").pack(side="left")
-        sp = ttk.Spinbox(row3, from_=1, to=500, width=6, textvariable=self.save_every_n)
-        sp.pack(side="left", padx=6)
-        ttk.Label(row3, text="(valid.txt + оновлення numbers.txt)").pack(side="left", padx=8)
+        ttk.Spinbox(row3, from_=1, to=500, width=6, textvariable=self.save_every_n).pack(side="left", padx=6)
+        ttk.Label(row3, text="(valid.txt + numbers.txt)").pack(side="left", padx=8)
 
         btns = ttk.Frame(root)
         btns.pack(fill="x", padx=14, pady=6)
@@ -276,7 +275,6 @@ class App:
                 return SPEED_WAIT_SECONDS
             if mode == "accuracy":
                 return ACCURACY_WAIT_SECONDS
-            # custom
             return max(0.3, float(self.custom_seconds.get()))
         except Exception:
             return SPEED_WAIT_SECONDS
@@ -339,6 +337,7 @@ class App:
         wait.until(EC.element_to_be_clickable((By.ID, "msisdn")))
         return wait
 
+    # ❗️back/client НЕ ЧІПАЄМО (як просив)
     def back_to_home_and_open_client(self, driver):
         if driver.find_elements(By.ID, "msisdn"):
             return self.wait_msisdn_ready(driver)
@@ -363,7 +362,7 @@ class App:
             inp.click()
             inp.send_keys(Keys.CONTROL, "a")
             inp.send_keys(Keys.BACKSPACE)
-            time.sleep(0.1)
+            time.sleep(0.08)
         except Exception:
             pass
 
@@ -380,7 +379,8 @@ class App:
             el.dispatchEvent(new Event('change',{bubbles:true}));
             """, inp, full
         )
-        time.sleep(0.15)
+        # мінімальна стабілізація
+        time.sleep(0.12)
 
     def click_search(self, driver, wait):
         btn = wait.until(EC.element_to_be_clickable((By.XPATH,
@@ -388,15 +388,45 @@ class App:
         )))
         self.js_click(driver, btn)
 
-    # Помилка screen
+    # ---------- FAST JS checks (основне прискорення) ----------
+
+    def js_has_label_text(self, driver, text_value: str) -> bool:
+        # швидко шукаємо label по тексту через JS
+        return bool(driver.execute_script(
+            """
+            const t = arguments[0];
+            const nodes = document.querySelectorAll('div.label');
+            for (const n of nodes) {
+              if ((n.textContent || '').trim() === t) return true;
+            }
+            return false;
+            """, text_value
+        ))
+
+    def js_has_error_text_contains(self, driver, contains_value: str) -> bool:
+        return bool(driver.execute_script(
+            """
+            const t = arguments[0];
+            const nodes = document.querySelectorAll('div.error-text');
+            for (const n of nodes) {
+              const s = (n.textContent || '').trim();
+              if (s.includes(t)) return true;
+            }
+            return false;
+            """, contains_value
+        ))
+
     def has_error_screen(self, driver):
-        return bool(driver.find_elements(By.XPATH, "//h1[normalize-space(.)='Помилка']"))
+        return bool(driver.execute_script(
+            """
+            const h = document.querySelector('h1');
+            return h && (h.textContent || '').trim() === 'Помилка';
+            """
+        ))
 
     def click_ok_anywhere(self, driver, timeout=2):
         btn = WebDriverWait(driver, timeout, poll_frequency=POLL).until(
-            EC.element_to_be_clickable((By.XPATH,
-                "//button[.//span[normalize-space(.)='Ок']]"
-            ))
+            EC.element_to_be_clickable((By.XPATH, "//button[.//span[normalize-space(.)='Ок']]"))
         )
         self.js_click(driver, btn)
 
@@ -405,7 +435,7 @@ class App:
             self.log("  ⚠ Виявлено екран «Помилка» → натискаю Ок")
             try:
                 self.click_ok_anywhere(driver, timeout=2)
-                time.sleep(0.3)
+                time.sleep(0.25)
             except Exception:
                 pass
             return True
@@ -420,25 +450,23 @@ class App:
                 pass
             time.sleep(ERROR_POLL_SECONDS)
 
-    def has_services_button(self, driver):
-        return bool(driver.find_elements(By.XPATH,
-            "//div[contains(@class,'content')][.//div[contains(@class,'label') and normalize-space(.)='Реєстрація послуг']]"
-        ))
+    def wait_services_only_fast(self, driver, wait_seconds: float) -> bool:
+        # 1) миттєва перевірка
+        if self.js_has_label_text(driver, "Реєстрація послуг"):
+            return True
 
-    def has_start_pack_button(self, driver):
-        return bool(driver.find_elements(By.XPATH,
-            "//div[contains(@class,'content')][.//div[contains(@class,'label') and normalize-space(.)='Реєстрація стартового пакету']]"
-        ))
-
-    def wait_services_only(self, driver, wait_seconds):
+        # 2) швидкий JS-полінг до ліміту (1.8/2.5/кастом)
         end = time.time() + wait_seconds
         while time.time() < end:
-            if self.has_services_button(driver):
+            if self.js_has_label_text(driver, "Реєстрація послуг"):
                 return True
             time.sleep(POLL)
         return False
 
-    def click_start_pack(self, driver, timeout=8):
+    def has_start_pack_fast(self, driver) -> bool:
+        return self.js_has_label_text(driver, "Реєстрація стартового пакету")
+
+    def click_start_pack(self, driver, timeout=6):
         el = WebDriverWait(driver, timeout, poll_frequency=POLL).until(
             EC.element_to_be_clickable((By.XPATH,
                 "//div[contains(@class,'content')][.//div[contains(@class,'label') and normalize-space(.)='Реєстрація стартового пакету']]"
@@ -446,7 +474,7 @@ class App:
         )
         self.js_click(driver, el)
 
-    def click_register(self, driver, timeout=8):
+    def click_register(self, driver, timeout=6):
         btn = WebDriverWait(driver, timeout, poll_frequency=POLL).until(
             EC.element_to_be_clickable((By.XPATH,
                 "//button[.//span[contains(@class,'mat-button-wrapper') and normalize-space(.)='Зареєструвати']]"
@@ -454,20 +482,16 @@ class App:
         )
         self.js_click(driver, btn)
 
-    def has_already_registered_error(self, driver):
-        return bool(driver.find_elements(By.XPATH,
-            "//div[contains(@class,'error-text') and contains(normalize-space(.),'Номер вже було зареєстровано')]"
-        ))
-
-    def wait_already_error_short(self, driver, seconds=1.3):
+    def wait_already_error_short_fast(self, driver, seconds=1.1) -> bool:
+        # швидко ловимо "Номер вже було зареєстровано" через JS
         end = time.time() + seconds
         while time.time() < end:
-            if self.has_already_registered_error(driver):
+            if self.js_has_error_text_contains(driver, "Номер вже було зареєстровано"):
                 return True
             time.sleep(POLL)
         return False
 
-    # ---------- checkpoint save ----------
+    # ---------- checkpoint ----------
 
     def checkpoint_save(self, original_lines, to_delete_numbers, valid_buf):
         if valid_buf:
@@ -511,6 +535,10 @@ class App:
         options.add_experimental_option("prefs", {"profile.default_content_setting_values.notifications": 2})
 
         driver = webdriver.Chrome(options=options)
+
+        # ✅ важливо для швидкості: прибираємо implicit_wait (він інколи додає секунди)
+        driver.implicitly_wait(0)
+
         wait_login = WebDriverWait(driver, WAIT_LOGIN_SECONDS, poll_frequency=POLL)
 
         try:
@@ -541,25 +569,28 @@ class App:
                         self.set_number_safe(driver, wait, number)
                         self.click_search(driver, wait)
 
+                        # якщо миттєво вилізла "Помилка" — прибираємо
                         self.handle_error_screen_once(driver)
 
-                        services = self.wait_services_only(driver, wait_seconds)
+                        # ✅ найшвидша перевірка: тільки "Реєстрація послуг"
+                        services = self.wait_services_only_fast(driver, wait_seconds)
 
                         if not services:
                             self.skipped_count += 1
                             self.ui_set_counts()
                             self.log("  ⏭ пропуск (нема «Реєстрація послуг»)")
                         else:
-                            if not self.has_start_pack_button(driver):
+                            # якщо "послуг" є, але "старт.пакету" нема — пропуск
+                            if not self.has_start_pack_fast(driver):
                                 self.skipped_count += 1
                                 self.ui_set_counts()
                                 self.log("  ⏭ Є «Реєстрація послуг», але нема «Реєстрація стартового пакету» → пропуск")
                             else:
                                 self.click_start_pack(driver)
-                                time.sleep(0.2)
+                                time.sleep(0.18)
                                 self.click_register(driver)
 
-                                already = self.wait_already_error_short(driver, seconds=1.3)
+                                already = self.wait_already_error_short_fast(driver, seconds=1.1)
 
                                 try:
                                     self.click_ok_anywhere(driver, timeout=4)
@@ -587,11 +618,9 @@ class App:
                 self.ui_update_eta()
                 time.sleep(pause)
 
-                # ✅ чекпоінт кожні N
                 if i % save_every == 0:
                     self.checkpoint_save(lines, to_delete_numbers, valid_buf)
 
-            # фінальне збереження
             self.checkpoint_save(lines, to_delete_numbers, valid_buf)
 
         finally:
