@@ -23,28 +23,61 @@ POLL = 0.03
 
 # ---------- parsing helpers ----------
 
+def normalize_to_9_digits(raw_digits: str):
+    """
+    Повертає 9 цифр у форматі lifecell: 9XXXXXXXX (без 380).
+    Приймає:
+      - 935180140
+      - 0935180140 -> 935180140
+      - 380935180140 -> 935180140
+    """
+    d = re.sub(r"\D+", "", raw_digits or "")
+    if not d:
+        return None
+
+    if d.startswith("380") and len(d) == 12:
+        return d[3:]
+
+    # 0 + 9 цифр (наприклад 0935180140)
+    if d.startswith("0") and len(d) == 10:
+        return d[1:]
+
+    # вже 9 цифр
+    if len(d) == 9:
+        return d
+
+    return None
+
+
 def extract_number_from_line(line: str):
     """
-    Повертає 9 цифр номера (без 380) або None.
-    Підтримує:
-      - 935180140- Максі 26.12
-      - 380935180140
-      - 935180140
-    Ігнорує дати/короткі числа типу 10.10 / 01.01.2026
+    Дістає номер з рядка (різні формати) і повертає 9 цифр або None.
     """
-    # шукаємо або 380 + 9 цифр, або рівно 9 цифр як окремий токен
-    m = re.search(r"(?:\b380(\d{9})\b|\b(\d{9})\b)", line)
-    if not m:
-        return None
-    return m.group(1) or m.group(2)
+    digits = re.sub(r"\D+", "", line)
+
+    # 380XXXXXXXXX (12)
+    m = re.search(r"380\d{9}", digits)
+    if m:
+        return normalize_to_9_digits(m.group(0))
+
+    # 0XXXXXXXXX (10)
+    m = re.search(r"0\d{9}", digits)
+    if m:
+        return normalize_to_9_digits(m.group(0))
+
+    # 9 цифр
+    m = re.search(r"\b\d{9}\b", line)
+    if m:
+        return normalize_to_9_digits(m.group(0))
+
+    return None
 
 
 def load_lines_with_numbers(path: str):
     """
-    Повертає:
-      lines: список оригінальних рядків (без \n)
-      items: список dict: {idx, line, number}
-    items тільки для тих рядків, де є валідний 9-значний номер.
+    lines: список рядків (без \n) як у файлі
+    items: список dict: {idx, line, number} лише для рядків з валідним номером
+    (дублі номерів прибираємо, беремо першу появу)
     """
     if not os.path.exists(path):
         return [], []
@@ -57,7 +90,6 @@ def load_lines_with_numbers(path: str):
         num = extract_number_from_line(line)
         if not num:
             continue
-        # прибираємо дублі номерів (беремо першу появу)
         if num in seen:
             continue
         seen.add(num)
@@ -88,7 +120,7 @@ class App:
     def __init__(self, root):
         self.root = root
         self.root.title("Lifecell Checker")
-        self.root.geometry("1060x780")
+        self.root.geometry("1080x800")
 
         self.status = tk.StringVar(value="Готово")
         self.progress_text = tk.StringVar(value="0 / 0")
@@ -103,9 +135,9 @@ class App:
 
         # режими очікування "Реєстрація послуг"
         self.mode = tk.StringVar(value="speed")
-        self.speed_seconds = tk.DoubleVar(value=3.0)     # швидко = 3с
-        self.accuracy_seconds = tk.DoubleVar(value=5.0)
-        self.custom_seconds = tk.DoubleVar(value=3.0)
+        self.speed_seconds = tk.DoubleVar(value=2.0)     # ✅ швидко = 2с
+        self.accuracy_seconds = tk.DoubleVar(value=4.0)  # ✅ надійно = 4с
+        self.custom_seconds = tk.DoubleVar(value=2.0)
 
         # пауза між номерами
         self.pause_seconds = tk.DoubleVar(value=1.0)
@@ -140,7 +172,6 @@ class App:
         self.pbar = ttk.Progressbar(root, orient="horizontal", mode="determinate", maximum=100)
         self.pbar.pack(fill="x", padx=14, pady=(0, 10))
 
-        # ---- Налаштування
         opt = ttk.LabelFrame(root, text="Налаштування")
         opt.pack(fill="x", padx=14, pady=(0, 10))
 
@@ -243,7 +274,7 @@ class App:
                 return max(0.3, float(self.accuracy_seconds.get()))
             return max(0.3, float(self.custom_seconds.get()))
         except Exception:
-            return 3.0
+            return 2.0
 
     def get_pause(self):
         try:
@@ -351,6 +382,11 @@ class App:
             "//div[contains(@class,'content')][.//div[contains(@class,'label') and normalize-space(.)='Реєстрація послуг']]"
         ))
 
+    def has_start_pack_button(self, driver):
+        return bool(driver.find_elements(By.XPATH,
+            "//div[contains(@class,'content')][.//div[contains(@class,'label') and normalize-space(.)='Реєстрація стартового пакету']]"
+        ))
+
     def wait_services_only(self, driver, wait_seconds):
         end = time.time() + wait_seconds
         while time.time() < end:
@@ -406,10 +442,8 @@ class App:
             self.btn_stop.configure(state="disabled")
             return
 
-        # порядок перевірки
         items_iter = list(reversed(items)) if self.order.get() == "end" else list(items)
 
-        # множини для видалення
         to_delete_numbers = set()  # VALID + already registered
         valid_buf = []
 
@@ -461,25 +495,31 @@ class App:
                         self.ui_set_counts()
                         self.log("  ⏭ пропуск (нема «Реєстрація послуг») — рядок лишається")
                     else:
-                        self.log("  ✅ Є «Реєстрація послуг» → Старт.пакет → Зареєструвати")
-                        self.click_start_pack(driver)
-                        time.sleep(0.2)
-                        self.click_register(driver)
-
-                        already = self.wait_already_error_short(driver, seconds=1.3)
-                        self.click_ok(driver)
-
-                        if already:
-                            self.already_count += 1
+                        # ✅ якщо є "Реєстрація послуг", але НЕМА "Реєстрація стартового пакету" -> пропуск
+                        if not self.has_start_pack_button(driver):
+                            self.skipped_count += 1
                             self.ui_set_counts()
-                            to_delete_numbers.add(number)
-                            self.log("  🟡 Номер вже було зареєстровано → видалити номер з numbers.txt")
+                            self.log("  ⏭ Є «Реєстрація послуг», але нема «Реєстрація стартового пакету» → пропуск")
                         else:
-                            self.valid_count += 1
-                            self.ui_set_counts()
-                            valid_buf.append(number)
-                            to_delete_numbers.add(number)
-                            self.log("  ✔ Зареєстровано (VALID) → видалити номер з numbers.txt")
+                            self.log("  ✅ Є «Реєстрація послуг» + «Стартовий пакет» → Зареєструвати")
+                            self.click_start_pack(driver)
+                            time.sleep(0.2)
+                            self.click_register(driver)
+
+                            already = self.wait_already_error_short(driver, seconds=1.3)
+                            self.click_ok(driver)
+
+                            if already:
+                                self.already_count += 1
+                                self.ui_set_counts()
+                                to_delete_numbers.add(number)
+                                self.log("  🟡 Номер вже було зареєстровано → видалити номер з numbers.txt")
+                            else:
+                                self.valid_count += 1
+                                self.ui_set_counts()
+                                valid_buf.append(number)
+                                to_delete_numbers.add(number)
+                                self.log("  ✔ Зареєстровано (VALID) → видалити номер з numbers.txt")
 
                 except Exception as e:
                     self.skipped_count += 1
@@ -490,12 +530,9 @@ class App:
                 self.ui_update_eta()
                 time.sleep(pause)
 
-            # дописуємо valid.txt
             append_lines(VALID_FILE, valid_buf)
 
             # перезаписуємо numbers.txt:
-            # - якщо keep_non_numbers=True -> залишаємо рядки без номерів
-            # - видаляємо тільки ті рядки, де номер є і він у to_delete_numbers
             new_lines = []
             for ln in lines:
                 num = extract_number_from_line(ln)
@@ -503,9 +540,10 @@ class App:
                     if self.keep_non_numbers.get():
                         new_lines.append(ln)
                     continue
-                # є номер
+
                 if num in to_delete_numbers:
                     continue
+
                 new_lines.append(ln)
 
             with open(NUMBERS_FILE, "w", encoding="utf-8") as f:
