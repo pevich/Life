@@ -60,14 +60,14 @@ class App:
     def __init__(self, root):
         self.root = root
         self.root.title("Lifecell Checker")
-        self.root.geometry("950x650")
+        self.root.geometry("980x680")
 
         self.status = tk.StringVar(value="Готово")
         self.progress_text = tk.StringVar(value="0 / 0")
-        self.count_text = tk.StringVar(value="Зареєстровано: 0 | Пропущено: 0")
+        self.count_text = tk.StringVar(value="VALID: 0 | Пропущено: 0 | Уже зареєстровано: 0")
 
         self.mode = tk.StringVar(value="speed")
-        self.speed_seconds = tk.DoubleVar(value=3.0)     # ✅ ШВИДКО = 3с
+        self.speed_seconds = tk.DoubleVar(value=3.0)     # швидко = 3с
         self.accuracy_seconds = tk.DoubleVar(value=5.0)
         self.custom_seconds = tk.DoubleVar(value=3.0)
         self.pause_seconds = tk.DoubleVar(value=1.0)
@@ -77,6 +77,7 @@ class App:
 
         self.valid_count = 0
         self.skipped_count = 0
+        self.already_count = 0
 
         ttk.Label(root, text="Lifecell Checker", font=("Segoe UI", 18, "bold")).pack(pady=10)
 
@@ -142,7 +143,7 @@ class App:
 
     def ui_set_counts(self):
         self.root.after(0, lambda: self.count_text.set(
-            f"Зареєстровано: {self.valid_count} | Пропущено: {self.skipped_count}"
+            f"VALID: {self.valid_count} | Пропущено: {self.skipped_count} | Уже зареєстровано: {self.already_count}"
         ))
 
     def get_services_wait(self):
@@ -169,6 +170,7 @@ class App:
         self.btn_stop.configure(state="normal")
         self.valid_count = 0
         self.skipped_count = 0
+        self.already_count = 0
         self.ui_set_counts()
         self.worker = threading.Thread(target=self.run, daemon=True)
         self.worker.start()
@@ -200,25 +202,21 @@ class App:
         return wait
 
     def back_to_home_and_open_client(self, driver):
-        """
-        ✅ ТВОЯ ЛОГІКА:
-        1) якщо msisdn є — працюємо
-        2) якщо нема — 1 раз "Назад"
-        3) якщо після "Назад" msisdn є — працюємо
-        4) якщо нема — 1 раз "Клієнт"
-        """
+        # 1) якщо поле вже є — працюємо
         if driver.find_elements(By.ID, "msisdn"):
             return self.wait_msisdn_ready(driver)
 
+        # 2) якщо нема — 1 раз "Назад"
         backs = driver.find_elements(By.XPATH, "//button[.//mat-icon[normalize-space(text())='arrow_back']]")
         if backs:
             self.js_click(driver, backs[0])
-            time.sleep(0.4)  # ✅ дать UI обновиться
+            time.sleep(0.4)
             try:
                 return self.wait_msisdn_ready(driver)
             except Exception:
                 pass
 
+        # 3) якщо після "Назад" нема — 1 раз "Клієнт"
         self.click_client(driver)
         time.sleep(0.4)
         return self.wait_msisdn_ready(driver)
@@ -233,6 +231,7 @@ class App:
             time.sleep(0.1)
         except Exception:
             pass
+
         driver.execute_script(
             """
             const el = arguments[0];
@@ -254,6 +253,7 @@ class App:
         )))
         self.js_click(driver, btn)
 
+    # --- потрібні елементи ---
     def has_services_button(self, driver):
         return bool(driver.find_elements(By.XPATH,
             "//div[contains(@class,'content')][.//div[contains(@class,'label') and normalize-space(.)='Реєстрація послуг']]"
@@ -263,6 +263,44 @@ class App:
         end = time.time() + wait_seconds
         while time.time() < end:
             if self.has_services_button(driver):
+                return True
+            time.sleep(POLL)
+        return False
+
+    def click_start_pack(self, driver, timeout=8):
+        el = WebDriverWait(driver, timeout, poll_frequency=POLL).until(
+            EC.element_to_be_clickable((By.XPATH,
+                "//div[contains(@class,'content')][.//div[contains(@class,'label') and normalize-space(.)='Реєстрація стартового пакету']]"
+            ))
+        )
+        self.js_click(driver, el)
+
+    def click_register(self, driver, timeout=8):
+        btn = WebDriverWait(driver, timeout, poll_frequency=POLL).until(
+            EC.element_to_be_clickable((By.XPATH,
+                "//button[.//span[contains(@class,'mat-button-wrapper') and normalize-space(.)='Зареєструвати']]"
+            ))
+        )
+        self.js_click(driver, btn)
+
+    def click_ok(self, driver, timeout=8):
+        btn = WebDriverWait(driver, timeout, poll_frequency=POLL).until(
+            EC.element_to_be_clickable((By.XPATH,
+                "//button[.//span[contains(@class,'mat-button-wrapper') and normalize-space(.)='Ок']]"
+            ))
+        )
+        self.js_click(driver, btn)
+
+    def has_already_registered_error(self, driver):
+        # ✅ "Номер вже було зареєстровано"
+        return bool(driver.find_elements(By.XPATH,
+            "//div[contains(@class,'error-text') and contains(normalize-space(.),'Номер вже було зареєстровано')]"
+        ))
+
+    def wait_already_error_short(self, driver, seconds=1.2):
+        end = time.time() + seconds
+        while time.time() < end:
+            if self.has_already_registered_error(driver):
                 return True
             time.sleep(POLL)
         return False
@@ -277,7 +315,7 @@ class App:
             self.btn_stop.configure(state="disabled")
             return
 
-        remaining_numbers = list(numbers)
+        remaining_numbers = list(numbers)   # тут лишаться ті, що НЕ видалили
         valid_buf = []
 
         wait_seconds = self.get_services_wait()
@@ -317,22 +355,49 @@ class App:
                     self.set_number_safe(driver, wait, number)
                     self.click_search(driver, wait)
 
-                    if self.wait_services_only(driver, wait_seconds):
+                    services = self.wait_services_only(driver, wait_seconds)
+
+                    if not services:
+                        # немає "Реєстрація послуг" -> просто пропуск, номер лишається
+                        self.skipped_count += 1
+                        self.ui_set_counts()
+                        self.log("  ⏭ пропуск (нема «Реєстрація послуг»)")
+                        time.sleep(pause)
+                        continue
+
+                    # є "Реєстрація послуг" -> робимо реєстрацію старт.пакету
+                    self.log("  ✅ Є «Реєстрація послуг» → Старт.пакет → Зареєструвати")
+                    self.click_start_pack(driver)
+                    time.sleep(0.2)
+                    self.click_register(driver)
+
+                    # перевіряємо чи з'явилась помилка "вже було зареєстровано"
+                    already = self.wait_already_error_short(driver, seconds=1.3)
+
+                    # Ок тиснемо завжди (закрити діалог/вікно)
+                    self.click_ok(driver)
+
+                    if already:
+                        # ✅ якщо вже було зареєстровано -> ВИДАЛЯЄМО ЗОВСІМ (з numbers)
+                        self.already_count += 1
+                        self.ui_set_counts()
+                        if number in remaining_numbers:
+                            remaining_numbers.remove(number)
+                        self.log("  🟡 Номер вже було зареєстровано → видалено з numbers.txt")
+                    else:
+                        # ✅ якщо не було помилки -> вважаємо що зареєстрували (VALID) і теж видаляємо
                         self.valid_count += 1
                         self.ui_set_counts()
                         valid_buf.append(number)
                         if number in remaining_numbers:
                             remaining_numbers.remove(number)
-                        self.log("  ✔ VALID (є «Реєстрація послуг»)")
-                    else:
-                        self.skipped_count += 1
-                        self.ui_set_counts()
-                        self.log("  ⏭ пропуск (нема «Реєстрація послуг»)")
+                        self.log("  ✔ Зареєстровано (VALID) → видалено з numbers.txt")
 
                 except Exception as e:
+                    # помилка — не видаляємо номер, щоб можна було повторити
                     self.skipped_count += 1
                     self.ui_set_counts()
-                    self.log(f"  ⚠ Помилка: {type(e).__name__} (пропуск)")
+                    self.log(f"  ⚠ Помилка: {type(e).__name__} (номер залишився)")
 
                 time.sleep(pause)
 
@@ -347,7 +412,7 @@ class App:
             self.status.set("Готово")
             self.btn_start.configure(state="normal")
             self.btn_stop.configure(state="disabled")
-            self.log("Готово. numbers.txt оновлено (видалено тільки VALID), valid.txt дописано.")
+            self.log("Готово. numbers.txt оновлено (видалено VALID + 'вже зареєстровано'), valid.txt дописано.")
 
 
 if __name__ == "__main__":
