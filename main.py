@@ -20,7 +20,11 @@ WAIT_LOGIN_SECONDS = 600
 WAIT_UI_SECONDS = 12
 POLL = 0.03
 
-ERROR_POLL_SECONDS = 1.0  # ✅ кожну 1 секунду перевіряємо "Помилка"
+ERROR_POLL_SECONDS = 1.0  # кожну 1 секунду перевіряємо "Помилка"
+
+# ✅ жорсткі режими (не змінюються в UI)
+SPEED_WAIT_SECONDS = 1.8
+ACCURACY_WAIT_SECONDS = 2.5
 
 
 # ---------- parsing helpers ----------
@@ -83,6 +87,23 @@ def append_lines(path, lines):
             f.write(x + "\n")
 
 
+def rewrite_numbers_file(original_lines, to_delete_numbers: set, keep_non_numbers: bool):
+    new_lines = []
+    for ln in original_lines:
+        num = extract_number_from_line(ln)
+        if not num:
+            if keep_non_numbers:
+                new_lines.append(ln)
+            continue
+        if num in to_delete_numbers:
+            continue
+        new_lines.append(ln)
+
+    with open(NUMBERS_FILE, "w", encoding="utf-8") as f:
+        for ln in new_lines:
+            f.write(ln + "\n")
+
+
 def fmt_duration(seconds: float) -> str:
     seconds = max(0, int(round(seconds)))
     m, s = divmod(seconds, 60)
@@ -98,7 +119,7 @@ class App:
     def __init__(self, root):
         self.root = root
         self.root.title("Lifecell Checker")
-        self.root.geometry("1080x820")
+        self.root.geometry("1100x860")
 
         self.status = tk.StringVar(value="Готово")
         self.progress_text = tk.StringVar(value="0 / 0")
@@ -108,20 +129,21 @@ class App:
         self.order = tk.StringVar(value="start")
         self.keep_non_numbers = tk.BooleanVar(value=True)
 
-        self.mode = tk.StringVar(value="speed")
-        self.speed_seconds = tk.DoubleVar(value=2.0)
-        self.accuracy_seconds = tk.DoubleVar(value=4.0)
-        self.custom_seconds = tk.DoubleVar(value=2.0)
+        self.mode = tk.StringVar(value="speed")  # speed / accuracy / custom
+        self.custom_seconds = tk.DoubleVar(value=SPEED_WAIT_SECONDS)
 
-        self.pause_seconds = tk.DoubleVar(value=1.0)
+        # ✅ пауза дефолт 0.5
+        self.pause_seconds = tk.DoubleVar(value=0.5)
+
+        # ✅ зберігати кожні N номерів (можна міняти)
+        self.save_every_n = tk.IntVar(value=20)
 
         self.stop_event = threading.Event()
         self.worker = None
 
-        # ✅ блокування для одночасних дій з driver (важливо!)
+        # ✅ lock щоб монітор "Помилка" не конфліктував з основним потоком
         self.driver_lock = threading.Lock()
 
-        # ✅ монітор "Помилка"
         self.error_watch_stop = threading.Event()
         self.error_watch_thread = None
 
@@ -172,22 +194,24 @@ class App:
         row1.pack(fill="x", padx=10, pady=6)
         ttk.Label(row1, text="Очікування «Реєстрація послуг»:").pack(side="left", padx=(0, 10))
 
-        ttk.Radiobutton(row1, text="Швидко", variable=self.mode, value="speed").pack(side="left")
-        ttk.Entry(row1, width=6, textvariable=self.speed_seconds).pack(side="left", padx=5)
-        ttk.Label(row1, text="сек").pack(side="left", padx=(0, 12))
-
-        ttk.Radiobutton(row1, text="Надійно", variable=self.mode, value="accuracy").pack(side="left")
-        ttk.Entry(row1, width=6, textvariable=self.accuracy_seconds).pack(side="left", padx=5)
-        ttk.Label(row1, text="сек").pack(side="left", padx=(0, 12))
+        ttk.Radiobutton(row1, text=f"Швидко ({SPEED_WAIT_SECONDS}s)", variable=self.mode, value="speed").pack(side="left", padx=(0, 12))
+        ttk.Radiobutton(row1, text=f"Надійно ({ACCURACY_WAIT_SECONDS}s)", variable=self.mode, value="accuracy").pack(side="left", padx=(0, 12))
 
         ttk.Radiobutton(row1, text="Кастом", variable=self.mode, value="custom").pack(side="left")
-        ttk.Entry(row1, width=6, textvariable=self.custom_seconds).pack(side="left", padx=5)
+        ttk.Entry(row1, width=6, textvariable=self.custom_seconds).pack(side="left", padx=6)
         ttk.Label(row1, text="сек").pack(side="left", padx=(0, 12))
 
         row2 = ttk.Frame(opt)
         row2.pack(fill="x", padx=10, pady=6)
         ttk.Label(row2, text="Пауза між номерами (сек):").pack(side="left")
         ttk.Entry(row2, width=6, textvariable=self.pause_seconds).pack(side="left", padx=6)
+
+        row3 = ttk.Frame(opt)
+        row3.pack(fill="x", padx=10, pady=6)
+        ttk.Label(row3, text="Зберігати прогрес кожні N номерів:").pack(side="left")
+        sp = ttk.Spinbox(row3, from_=1, to=500, width=6, textvariable=self.save_every_n)
+        sp.pack(side="left", padx=6)
+        ttk.Label(row3, text="(valid.txt + оновлення numbers.txt)").pack(side="left", padx=8)
 
         btns = ttk.Frame(root)
         btns.pack(fill="x", padx=14, pady=6)
@@ -247,19 +271,27 @@ class App:
 
     def get_services_wait(self):
         try:
-            if self.mode.get() == "speed":
-                return max(0.3, float(self.speed_seconds.get()))
-            if self.mode.get() == "accuracy":
-                return max(0.3, float(self.accuracy_seconds.get()))
+            mode = self.mode.get()
+            if mode == "speed":
+                return SPEED_WAIT_SECONDS
+            if mode == "accuracy":
+                return ACCURACY_WAIT_SECONDS
+            # custom
             return max(0.3, float(self.custom_seconds.get()))
         except Exception:
-            return 2.0
+            return SPEED_WAIT_SECONDS
 
     def get_pause(self):
         try:
             return max(0.0, float(self.pause_seconds.get()))
         except Exception:
-            return 1.0
+            return 0.5
+
+    def get_save_every_n(self):
+        try:
+            return max(1, int(self.save_every_n.get()))
+        except Exception:
+            return 20
 
     def start(self):
         if self.worker and self.worker.is_alive():
@@ -276,7 +308,6 @@ class App:
         self.run_started_at = time.time()
         self.done_count = 0
         self.total_count = 0
-        self.eta_text.set("Середній: - | ETA: - | Пройшло: 0с")
 
         self.worker = threading.Thread(target=self.run, daemon=True)
         self.worker.start()
@@ -357,7 +388,7 @@ class App:
         )))
         self.js_click(driver, btn)
 
-    # ✅ Помилка screen
+    # Помилка screen
     def has_error_screen(self, driver):
         return bool(driver.find_elements(By.XPATH, "//h1[normalize-space(.)='Помилка']"))
 
@@ -380,7 +411,6 @@ class App:
             return True
         return False
 
-    # ✅ монітор, який кожну секунду прибирає "Помилка"
     def error_watch_loop(self, driver):
         while not self.error_watch_stop.is_set() and not self.stop_event.is_set():
             try:
@@ -390,7 +420,6 @@ class App:
                 pass
             time.sleep(ERROR_POLL_SECONDS)
 
-    # services / start pack
     def has_services_button(self, driver):
         return bool(driver.find_elements(By.XPATH,
             "//div[contains(@class,'content')][.//div[contains(@class,'label') and normalize-space(.)='Реєстрація послуг']]"
@@ -425,9 +454,6 @@ class App:
         )
         self.js_click(driver, btn)
 
-    def click_ok(self, driver, timeout=8):
-        self.click_ok_anywhere(driver, timeout=timeout)
-
     def has_already_registered_error(self, driver):
         return bool(driver.find_elements(By.XPATH,
             "//div[contains(@class,'error-text') and contains(normalize-space(.),'Номер вже було зареєстровано')]"
@@ -440,6 +466,19 @@ class App:
                 return True
             time.sleep(POLL)
         return False
+
+    # ---------- checkpoint save ----------
+
+    def checkpoint_save(self, original_lines, to_delete_numbers, valid_buf):
+        if valid_buf:
+            append_lines(VALID_FILE, valid_buf)
+            valid_buf.clear()
+        rewrite_numbers_file(
+            original_lines=original_lines,
+            to_delete_numbers=to_delete_numbers,
+            keep_non_numbers=self.keep_non_numbers.get()
+        )
+        self.log(f"💾 Checkpoint: збережено прогрес (кожні {self.get_save_every_n()} номерів)")
 
     # ---------- MAIN ----------
 
@@ -458,10 +497,12 @@ class App:
 
         wait_seconds = self.get_services_wait()
         pause = self.get_pause()
+        save_every = self.get_save_every_n()
 
         self.total_count = len(items_iter)
         self.done_count = 0
-        self.ui_update_eta()
+        self.ui_set_progress(0, self.total_count)
+        self.run_started_at = time.time()
 
         options = webdriver.ChromeOptions()
         options.add_argument("--disable-notifications")
@@ -472,8 +513,6 @@ class App:
         driver = webdriver.Chrome(options=options)
         wait_login = WebDriverWait(driver, WAIT_LOGIN_SECONDS, poll_frequency=POLL)
 
-        self.ui_set_progress(0, self.total_count)
-
         try:
             driver.get(URL)
             self.log("Очікую логін/2FA/капчу...")
@@ -483,7 +522,6 @@ class App:
             )))
             self.log("Авторизація OK")
 
-            # ✅ стартуємо монітор "Помилка"
             self.error_watch_stop.clear()
             self.error_watch_thread = threading.Thread(target=self.error_watch_loop, args=(driver,), daemon=True)
             self.error_watch_thread.start()
@@ -503,7 +541,6 @@ class App:
                         self.set_number_safe(driver, wait, number)
                         self.click_search(driver, wait)
 
-                        # ✅ миттєва перевірка одразу після пошуку
                         self.handle_error_screen_once(driver)
 
                         services = self.wait_services_only(driver, wait_seconds)
@@ -511,20 +548,23 @@ class App:
                         if not services:
                             self.skipped_count += 1
                             self.ui_set_counts()
-                            self.log("  ⏭ пропуск (нема «Реєстрація послуг») — рядок лишається")
+                            self.log("  ⏭ пропуск (нема «Реєстрація послуг»)")
                         else:
                             if not self.has_start_pack_button(driver):
                                 self.skipped_count += 1
                                 self.ui_set_counts()
                                 self.log("  ⏭ Є «Реєстрація послуг», але нема «Реєстрація стартового пакету» → пропуск")
                             else:
-                                self.log("  ✅ Є «Реєстрація послуг» + «Стартовий пакет» → Зареєструвати")
                                 self.click_start_pack(driver)
                                 time.sleep(0.2)
                                 self.click_register(driver)
 
                                 already = self.wait_already_error_short(driver, seconds=1.3)
-                                self.click_ok(driver)
+
+                                try:
+                                    self.click_ok_anywhere(driver, timeout=4)
+                                except Exception:
+                                    pass
 
                                 if already:
                                     self.already_count += 1
@@ -541,31 +581,20 @@ class App:
                 except Exception as e:
                     self.skipped_count += 1
                     self.ui_set_counts()
-                    self.log(f"  ⚠ Помилка: {type(e).__name__} (рядок лишається)")
+                    self.log(f"  ⚠ Помилка: {type(e).__name__}")
 
                 self.done_count += 1
                 self.ui_update_eta()
                 time.sleep(pause)
 
-            append_lines(VALID_FILE, valid_buf)
+                # ✅ чекпоінт кожні N
+                if i % save_every == 0:
+                    self.checkpoint_save(lines, to_delete_numbers, valid_buf)
 
-            new_lines = []
-            for ln in lines:
-                num = extract_number_from_line(ln)
-                if not num:
-                    if self.keep_non_numbers.get():
-                        new_lines.append(ln)
-                    continue
-                if num in to_delete_numbers:
-                    continue
-                new_lines.append(ln)
-
-            with open(NUMBERS_FILE, "w", encoding="utf-8") as f:
-                for ln in new_lines:
-                    f.write(ln + "\n")
+            # фінальне збереження
+            self.checkpoint_save(lines, to_delete_numbers, valid_buf)
 
         finally:
-            # ✅ зупиняємо монітор
             self.error_watch_stop.set()
             try:
                 if self.error_watch_thread and self.error_watch_thread.is_alive():
@@ -582,7 +611,7 @@ class App:
             self.btn_start.configure(state="normal")
             self.btn_stop.configure(state="disabled")
             self.ui_update_eta()
-            self.log("Готово. numbers.txt оновлено (видалено VALID + 'вже зареєстровано').")
+            self.log("Готово. Прогрес збережено.")
 
 
 if __name__ == "__main__":
