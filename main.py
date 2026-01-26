@@ -21,31 +21,48 @@ WAIT_UI_SECONDS = 12
 POLL = 0.03
 
 
-def parse_number_line(line: str):
-    # 935180140- Максі 26.12  -> 935180140
-    m = re.search(r"(380\d{9}|\b\d{9}\b)", line)
+# ---------- parsing helpers ----------
+
+def extract_number_from_line(line: str):
+    """
+    Повертає 9 цифр номера (без 380) або None.
+    Підтримує:
+      - 935180140- Максі 26.12
+      - 380935180140
+      - 935180140
+    Ігнорує дати/короткі числа типу 10.10 / 01.01.2026
+    """
+    # шукаємо або 380 + 9 цифр, або рівно 9 цифр як окремий токен
+    m = re.search(r"(?:\b380(\d{9})\b|\b(\d{9})\b)", line)
     if not m:
         return None
-    digits = m.group(1)
-    return digits[3:] if digits.startswith("380") else digits
+    return m.group(1) or m.group(2)
 
 
-def load_numbers():
-    if not os.path.exists(NUMBERS_FILE):
-        return []
-    out = []
-    with open(NUMBERS_FILE, "r", encoding="utf-8") as f:
-        for line in f:
-            n = parse_number_line(line)
-            if n:
-                out.append(n)
-    return list(dict.fromkeys(out))
+def load_lines_with_numbers(path: str):
+    """
+    Повертає:
+      lines: список оригінальних рядків (без \n)
+      items: список dict: {idx, line, number}
+    items тільки для тих рядків, де є валідний 9-значний номер.
+    """
+    if not os.path.exists(path):
+        return [], []
+    with open(path, "r", encoding="utf-8") as f:
+        lines = [ln.rstrip("\n") for ln in f]
 
-
-def save_numbers(numbers):
-    with open(NUMBERS_FILE, "w", encoding="utf-8") as f:
-        for n in numbers:
-            f.write(n + "\n")
+    items = []
+    seen = set()
+    for idx, line in enumerate(lines):
+        num = extract_number_from_line(line)
+        if not num:
+            continue
+        # прибираємо дублі номерів (беремо першу появу)
+        if num in seen:
+            continue
+        seen.add(num)
+        items.append({"idx": idx, "line": line, "number": num})
+    return lines, items
 
 
 def append_lines(path, lines):
@@ -71,7 +88,7 @@ class App:
     def __init__(self, root):
         self.root = root
         self.root.title("Lifecell Checker")
-        self.root.geometry("1020x740")
+        self.root.geometry("1060x780")
 
         self.status = tk.StringVar(value="Готово")
         self.progress_text = tk.StringVar(value="0 / 0")
@@ -80,6 +97,9 @@ class App:
 
         # порядок
         self.order = tk.StringVar(value="start")  # start / end
+
+        # зберігати рядки без номерів?
+        self.keep_non_numbers = tk.BooleanVar(value=True)
 
         # режими очікування "Реєстрація послуг"
         self.mode = tk.StringVar(value="speed")
@@ -129,6 +149,14 @@ class App:
         ttk.Label(row0, text="Перевіряти:").pack(side="left")
         ttk.Radiobutton(row0, text="З початку", variable=self.order, value="start").pack(side="left", padx=10)
         ttk.Radiobutton(row0, text="З кінця", variable=self.order, value="end").pack(side="left", padx=10)
+
+        row00 = ttk.Frame(opt)
+        row00.pack(fill="x", padx=10, pady=6)
+        ttk.Checkbutton(
+            row00,
+            text="Зберігати рядки без номерів (текст/дати) у numbers.txt",
+            variable=self.keep_non_numbers
+        ).pack(side="left")
 
         row1 = ttk.Frame(opt)
         row1.pack(fill="x", padx=10, pady=6)
@@ -182,12 +210,12 @@ class App:
         ))
 
     def ui_update_eta(self):
-        # викликаємо часто: рахує ETA по середньому часу на DONE
         if not self.run_started_at or self.total_count <= 0:
             return
         elapsed = time.time() - self.run_started_at
         done = max(0, self.done_count)
         left = max(0, self.total_count - done)
+
         if done <= 0:
             avg = None
             eta = None
@@ -270,11 +298,9 @@ class App:
         return wait
 
     def back_to_home_and_open_client(self, driver):
-        # 1) якщо поле вже є — працюємо
         if driver.find_elements(By.ID, "msisdn"):
             return self.wait_msisdn_ready(driver)
 
-        # 2) якщо нема — 1 раз "Назад"
         backs = driver.find_elements(By.XPATH, "//button[.//mat-icon[normalize-space(text())='arrow_back']]")
         if backs:
             self.js_click(driver, backs[0])
@@ -284,7 +310,6 @@ class App:
             except Exception:
                 pass
 
-        # 3) якщо після "Назад" нема — 1 раз "Клієнт"
         self.click_client(driver)
         time.sleep(0.4)
         return self.wait_msisdn_ready(driver)
@@ -374,22 +399,24 @@ class App:
     # ---------- MAIN ----------
 
     def run(self):
-        numbers = load_numbers()
-        if not numbers:
-            messagebox.showerror("Помилка", "numbers.txt не містить валідних номерів")
+        lines, items = load_lines_with_numbers(NUMBERS_FILE)
+        if not items:
+            messagebox.showerror("Помилка", "numbers.txt не містить жодного валідного номера (9 цифр)")
             self.btn_start.configure(state="normal")
             self.btn_stop.configure(state="disabled")
             return
 
-        remaining_numbers = list(numbers)   # зберігаємо порядок у файлі
+        # порядок перевірки
+        items_iter = list(reversed(items)) if self.order.get() == "end" else list(items)
+
+        # множини для видалення
+        to_delete_numbers = set()  # VALID + already registered
         valid_buf = []
 
         wait_seconds = self.get_services_wait()
         pause = self.get_pause()
 
-        numbers_iter = list(reversed(numbers)) if self.order.get() == "end" else list(numbers)
-
-        self.total_count = len(numbers_iter)
+        self.total_count = len(items_iter)
         self.done_count = 0
         self.ui_update_eta()
 
@@ -402,8 +429,7 @@ class App:
         driver = webdriver.Chrome(options=options)
         wait_login = WebDriverWait(driver, WAIT_LOGIN_SECONDS, poll_frequency=POLL)
 
-        total = len(numbers_iter)
-        self.ui_set_progress(0, total)
+        self.ui_set_progress(0, self.total_count)
 
         try:
             driver.get(URL)
@@ -414,13 +440,14 @@ class App:
             )))
             self.log("Авторизація OK")
 
-            for i, number in enumerate(numbers_iter, 1):
+            for i, it in enumerate(items_iter, 1):
                 if self.stop_event.is_set():
                     break
 
-                self.ui_set_progress(i, total)
+                number = it["number"]
+                self.ui_set_progress(i, self.total_count)
                 self.status.set(f"380{number}")
-                self.log(f"→ 380{number}")
+                self.log(f"→ 380{number} | рядок: {it['line']}")
 
                 try:
                     wait = self.back_to_home_and_open_client(driver)
@@ -432,7 +459,7 @@ class App:
                     if not services:
                         self.skipped_count += 1
                         self.ui_set_counts()
-                        self.log("  ⏭ пропуск (нема «Реєстрація послуг») — номер лишився в numbers.txt")
+                        self.log("  ⏭ пропуск (нема «Реєстрація послуг») — рядок лишається")
                     else:
                         self.log("  ✅ Є «Реєстрація послуг» → Старт.пакет → Зареєструвати")
                         self.click_start_pack(driver)
@@ -445,30 +472,45 @@ class App:
                         if already:
                             self.already_count += 1
                             self.ui_set_counts()
-                            if number in remaining_numbers:
-                                remaining_numbers.remove(number)
-                            self.log("  🟡 Номер вже було зареєстровано → видалено з numbers.txt")
+                            to_delete_numbers.add(number)
+                            self.log("  🟡 Номер вже було зареєстровано → видалити номер з numbers.txt")
                         else:
                             self.valid_count += 1
                             self.ui_set_counts()
                             valid_buf.append(number)
-                            if number in remaining_numbers:
-                                remaining_numbers.remove(number)
-                            self.log("  ✔ Зареєстровано (VALID) → видалено з numbers.txt")
+                            to_delete_numbers.add(number)
+                            self.log("  ✔ Зареєстровано (VALID) → видалити номер з numbers.txt")
 
                 except Exception as e:
                     self.skipped_count += 1
                     self.ui_set_counts()
-                    self.log(f"  ⚠ Помилка: {type(e).__name__} (номер залишився)")
+                    self.log(f"  ⚠ Помилка: {type(e).__name__} (рядок лишається)")
 
-                # done для ETA
                 self.done_count += 1
                 self.ui_update_eta()
-
                 time.sleep(pause)
 
+            # дописуємо valid.txt
             append_lines(VALID_FILE, valid_buf)
-            save_numbers(remaining_numbers)
+
+            # перезаписуємо numbers.txt:
+            # - якщо keep_non_numbers=True -> залишаємо рядки без номерів
+            # - видаляємо тільки ті рядки, де номер є і він у to_delete_numbers
+            new_lines = []
+            for ln in lines:
+                num = extract_number_from_line(ln)
+                if not num:
+                    if self.keep_non_numbers.get():
+                        new_lines.append(ln)
+                    continue
+                # є номер
+                if num in to_delete_numbers:
+                    continue
+                new_lines.append(ln)
+
+            with open(NUMBERS_FILE, "w", encoding="utf-8") as f:
+                for ln in new_lines:
+                    f.write(ln + "\n")
 
         finally:
             try:
@@ -479,7 +521,7 @@ class App:
             self.btn_start.configure(state="normal")
             self.btn_stop.configure(state="disabled")
             self.ui_update_eta()
-            self.log("Готово. numbers.txt оновлено (видалено VALID + 'вже зареєстровано'), valid.txt дописано.")
+            self.log("Готово. numbers.txt оновлено (видалено VALID + 'вже зареєстровано').")
 
 
 if __name__ == "__main__":
