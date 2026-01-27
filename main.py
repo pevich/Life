@@ -15,16 +15,15 @@ URL = "https://my-ambassador.lifecell.ua"
 
 NUMBERS_FILE = "numbers.txt"
 VALID_FILE = "valid.txt"
+REGSOON_FILE = "regsoon.txt"
 
 WAIT_LOGIN_SECONDS = 600
 WAIT_UI_SECONDS = 12
 
-# ✅ Тюнінг швидкості (менше пауз між перевірками DOM)
-POLL = 0.02
+# быстрее опрос DOM (ты просил 0.05)
+POLL = 0.05
 
-ERROR_POLL_SECONDS = 1.0
-
-# ✅ жорсткі режими (не змінюються)
+# жёсткие режимы
 SPEED_WAIT_SECONDS = 1.8
 ACCURACY_WAIT_SECONDS = 2.5
 
@@ -131,21 +130,17 @@ class App:
         self.order = tk.StringVar(value="start")
         self.keep_non_numbers = tk.BooleanVar(value=True)
 
+        # ✅ НОВЕ: галочка для RegSoon
+        self.write_regsoon = tk.BooleanVar(value=True)
+
         self.mode = tk.StringVar(value="speed")  # speed / accuracy / custom
         self.custom_seconds = tk.DoubleVar(value=SPEED_WAIT_SECONDS)
 
-        # ✅ пауза дефолт 0.5
         self.pause_seconds = tk.DoubleVar(value=0.5)
-
-        # ✅ зберігати кожні N номерів
         self.save_every_n = tk.IntVar(value=20)
 
         self.stop_event = threading.Event()
         self.worker = None
-
-        self.driver_lock = threading.Lock()
-        self.error_watch_stop = threading.Event()
-        self.error_watch_thread = None
 
         self.valid_count = 0
         self.skipped_count = 0
@@ -189,6 +184,13 @@ class App:
             text="Зберігати рядки без номерів (текст/дати) у numbers.txt",
             variable=self.keep_non_numbers
         ).pack(side="left")
+
+        # ✅ НОВЕ: RegSoon toggle
+        ttk.Checkbutton(
+            row00,
+            text="Записувати в regsoon.txt (RegSoon)",
+            variable=self.write_regsoon
+        ).pack(side="left", padx=18)
 
         row1 = ttk.Frame(opt)
         row1.pack(fill="x", padx=10, pady=6)
@@ -313,7 +315,6 @@ class App:
     def stop(self):
         self.stop_event.set()
         self.status.set("Зупинка...")
-        self.error_watch_stop.set()
 
     # ---------- Selenium helpers ----------
 
@@ -337,7 +338,7 @@ class App:
         wait.until(EC.element_to_be_clickable((By.ID, "msisdn")))
         return wait
 
-    # ❗️back/client НЕ ЧІПАЄМО (як просив)
+    # back/client НЕ трогаем
     def back_to_home_and_open_client(self, driver):
         if driver.find_elements(By.ID, "msisdn"):
             return self.wait_msisdn_ready(driver)
@@ -345,15 +346,37 @@ class App:
         backs = driver.find_elements(By.XPATH, "//button[.//mat-icon[normalize-space(text())='arrow_back']]")
         if backs:
             self.js_click(driver, backs[0])
-            time.sleep(0.4)
+            time.sleep(0.12)
             try:
                 return self.wait_msisdn_ready(driver)
             except Exception:
                 pass
 
         self.click_client(driver)
-        time.sleep(0.4)
+        time.sleep(0.12)
         return self.wait_msisdn_ready(driver)
+
+    def wait_search_ready(self, driver, timeout=WAIT_UI_SECONDS) -> bool:
+        """
+        Чекає, поки кнопка 'Пошук' стане активною (без mat-button-disabled).
+        Також прибирає екран 'Помилка' якщо виліз.
+        """
+        end = time.time() + timeout
+        while time.time() < end:
+            if self.stop_event.is_set():
+                return False
+
+            self.handle_error_screen_once(driver)
+
+            btns = driver.find_elements(By.XPATH,
+                "//button[.//span[contains(@class,'mat-button-wrapper') and normalize-space(.)='Пошук']]"
+            )
+            if btns:
+                cls = (btns[0].get_attribute("class") or "")
+                if "mat-button-disabled" not in cls:
+                    return True
+            time.sleep(POLL)
+        return False
 
     def set_number_safe(self, driver, wait, number):
         inp = wait.until(EC.element_to_be_clickable((By.ID, "msisdn")))
@@ -362,7 +385,7 @@ class App:
             inp.click()
             inp.send_keys(Keys.CONTROL, "a")
             inp.send_keys(Keys.BACKSPACE)
-            time.sleep(0.08)
+            time.sleep(0.05)
         except Exception:
             pass
 
@@ -379,8 +402,9 @@ class App:
             el.dispatchEvent(new Event('change',{bubbles:true}));
             """, inp, full
         )
-        # мінімальна стабілізація
-        time.sleep(0.12)
+
+        # ✅ вместо фиксированного sleep — ждём, пока "Пошук" станет активной
+        self.wait_search_ready(driver, timeout=3)
 
     def click_search(self, driver, wait):
         btn = wait.until(EC.element_to_be_clickable((By.XPATH,
@@ -388,10 +412,9 @@ class App:
         )))
         self.js_click(driver, btn)
 
-    # ---------- FAST JS checks (основне прискорення) ----------
+    # ---------- FAST JS checks ----------
 
     def js_has_label_text(self, driver, text_value: str) -> bool:
-        # швидко шукаємо label по тексту через JS
         return bool(driver.execute_script(
             """
             const t = arguments[0];
@@ -435,35 +458,32 @@ class App:
             self.log("  ⚠ Виявлено екран «Помилка» → натискаю Ок")
             try:
                 self.click_ok_anywhere(driver, timeout=2)
-                time.sleep(0.25)
+                time.sleep(0.12)
             except Exception:
                 pass
             return True
         return False
 
-    def error_watch_loop(self, driver):
-        while not self.error_watch_stop.is_set() and not self.stop_event.is_set():
-            try:
-                with self.driver_lock:
-                    self.handle_error_screen_once(driver)
-            except Exception:
-                pass
-            time.sleep(ERROR_POLL_SECONDS)
-
     def wait_services_only_fast(self, driver, wait_seconds: float) -> bool:
-        # 1) миттєва перевірка
+        # быстрый шанс сразу
+        self.handle_error_screen_once(driver)
         if self.js_has_label_text(driver, "Реєстрація послуг"):
             return True
 
-        # 2) швидкий JS-полінг до ліміту (1.8/2.5/кастом)
         end = time.time() + wait_seconds
         while time.time() < end:
+            if self.stop_event.is_set():
+                return False
+
+            self.handle_error_screen_once(driver)
+
             if self.js_has_label_text(driver, "Реєстрація послуг"):
                 return True
             time.sleep(POLL)
         return False
 
     def has_start_pack_fast(self, driver) -> bool:
+        self.handle_error_screen_once(driver)
         return self.js_has_label_text(driver, "Реєстрація стартового пакету")
 
     def click_start_pack(self, driver, timeout=6):
@@ -483,9 +503,13 @@ class App:
         self.js_click(driver, btn)
 
     def wait_already_error_short_fast(self, driver, seconds=1.1) -> bool:
-        # швидко ловимо "Номер вже було зареєстровано" через JS
         end = time.time() + seconds
         while time.time() < end:
+            if self.stop_event.is_set():
+                return False
+
+            self.handle_error_screen_once(driver)
+
             if self.js_has_error_text_contains(driver, "Номер вже було зареєстровано"):
                 return True
             time.sleep(POLL)
@@ -531,12 +555,26 @@ class App:
         options = webdriver.ChromeOptions()
         options.add_argument("--disable-notifications")
         options.add_argument("--start-maximized")
+
+        # ✅ ускорение (без отключения картинок)
+        options.add_argument("--disable-extensions")
+        options.add_argument("--disable-background-networking")
+        options.add_argument("--disable-default-apps")
+        options.add_argument("--disable-sync")
+        options.add_argument("--metrics-recording-only")
+        options.add_argument("--disable-features=Translate,BackForwardCache")
+
+        # ✅ GPU флаги (как было)
+        options.add_argument("--use-gl=angle")
+        options.add_argument("--use-angle=default")
+        options.add_argument("--enable-gpu-rasterization")
+        options.add_argument("--enable-zero-copy")
+        options.add_argument("--disable-software-rasterizer")  # если будут глюки — убери эту строку
+
         options.page_load_strategy = "eager"
         options.add_experimental_option("prefs", {"profile.default_content_setting_values.notifications": 2})
 
         driver = webdriver.Chrome(options=options)
-
-        # ✅ важливо для швидкості: прибираємо implicit_wait (він інколи додає секунди)
         driver.implicitly_wait(0)
 
         wait_login = WebDriverWait(driver, WAIT_LOGIN_SECONDS, poll_frequency=POLL)
@@ -550,10 +588,6 @@ class App:
             )))
             self.log("Авторизація OK")
 
-            self.error_watch_stop.clear()
-            self.error_watch_thread = threading.Thread(target=self.error_watch_loop, args=(driver,), daemon=True)
-            self.error_watch_thread.start()
-
             for i, it in enumerate(items_iter, 1):
                 if self.stop_event.is_set():
                     break
@@ -564,50 +598,65 @@ class App:
                 self.log(f"→ 380{number} | рядок: {it['line']}")
 
                 try:
-                    with self.driver_lock:
-                        wait = self.back_to_home_and_open_client(driver)
-                        self.set_number_safe(driver, wait, number)
-                        self.click_search(driver, wait)
+                    wait = self.back_to_home_and_open_client(driver)
+                    self.set_number_safe(driver, wait, number)
 
-                        # якщо миттєво вилізла "Помилка" — прибираємо
-                        self.handle_error_screen_once(driver)
+                    # на всякий случай: если "Пошук" ещё disabled — подождём
+                    self.wait_search_ready(driver, timeout=3)
 
-                        # ✅ найшвидша перевірка: тільки "Реєстрація послуг"
-                        services = self.wait_services_only_fast(driver, wait_seconds)
+                    self.click_search(driver, wait)
+                    self.handle_error_screen_once(driver)
 
-                        if not services:
-                            self.skipped_count += 1
+                    # ✅ новая логика (RegSoon + комбо)
+                    services = self.wait_services_only_fast(driver, wait_seconds)
+                    has_start_pack = self.has_start_pack_fast(driver)
+
+                    # 🟡 ВАРІАНТ: є стартовий пакет, але нема "Реєстрація послуг"
+                    if has_start_pack and not services:
+                        if self.write_regsoon.get():
+                            with open(REGSOON_FILE, "a", encoding="utf-8") as f:
+                                f.write(number + "\n")
+
+                        self.log("  🕒 Є «Реєстрація стартового пакету», але нема «Реєстрація послуг» → RegSoon")
+                        self.skipped_count += 1
+                        self.ui_set_counts()
+
+                    # ❌ нема "Реєстрація послуг" і нема стартового пакету
+                    elif not services and not has_start_pack:
+                        self.skipped_count += 1
+                        self.ui_set_counts()
+                        self.log("  ⏭ пропуск (нема «Реєстрація послуг» і нема старт.пакету)")
+
+                    # ✅ нормальна реєстрація
+                    elif services and has_start_pack:
+                        self.click_start_pack(driver)
+                        time.sleep(0.10)  # было 0.18
+                        self.click_register(driver)
+
+                        already = self.wait_already_error_short_fast(driver, seconds=1.1)
+
+                        try:
+                            self.click_ok_anywhere(driver, timeout=4)
+                        except Exception:
+                            pass
+
+                        if already:
+                            self.already_count += 1
                             self.ui_set_counts()
-                            self.log("  ⏭ пропуск (нема «Реєстрація послуг»)")
+                            to_delete_numbers.add(number)
+                            self.log("  🟡 Номер вже було зареєстровано → видалити з numbers.txt")
                         else:
-                            # якщо "послуг" є, але "старт.пакету" нема — пропуск
-                            if not self.has_start_pack_fast(driver):
-                                self.skipped_count += 1
-                                self.ui_set_counts()
-                                self.log("  ⏭ Є «Реєстрація послуг», але нема «Реєстрація стартового пакету» → пропуск")
-                            else:
-                                self.click_start_pack(driver)
-                                time.sleep(0.18)
-                                self.click_register(driver)
+                            self.valid_count += 1
+                            self.ui_set_counts()
+                            valid_buf.append(number)
+                            to_delete_numbers.add(number)
+                            self.log("  ✔ Зареєстровано (VALID) → видалити з numbers.txt")
 
-                                already = self.wait_already_error_short_fast(driver, seconds=1.1)
-
-                                try:
-                                    self.click_ok_anywhere(driver, timeout=4)
-                                except Exception:
-                                    pass
-
-                                if already:
-                                    self.already_count += 1
-                                    self.ui_set_counts()
-                                    to_delete_numbers.add(number)
-                                    self.log("  🟡 Номер вже було зареєстровано → видалити з numbers.txt")
-                                else:
-                                    self.valid_count += 1
-                                    self.ui_set_counts()
-                                    valid_buf.append(number)
-                                    to_delete_numbers.add(number)
-                                    self.log("  ✔ Зареєстровано (VALID) → видалити з numbers.txt")
+                    # ⚠ інші комбінації
+                    else:
+                        self.skipped_count += 1
+                        self.ui_set_counts()
+                        self.log("  ⏭ незрозумілий стан → пропуск")
 
                 except Exception as e:
                     self.skipped_count += 1
@@ -624,13 +673,6 @@ class App:
             self.checkpoint_save(lines, to_delete_numbers, valid_buf)
 
         finally:
-            self.error_watch_stop.set()
-            try:
-                if self.error_watch_thread and self.error_watch_thread.is_alive():
-                    self.error_watch_thread.join(timeout=2)
-            except Exception:
-                pass
-
             try:
                 driver.quit()
             except Exception:
