@@ -4,6 +4,7 @@ import time
 import threading
 import tkinter as tk
 from tkinter import ttk, messagebox
+import random
 
 from selenium import webdriver
 from selenium.webdriver.common.by import By
@@ -26,6 +27,9 @@ POLL = 0.05
 # жёсткие режимы
 SPEED_WAIT_SECONDS = 1.8
 ACCURACY_WAIT_SECONDS = 2.5
+
+# ✅ Префиксы (2 цифры) + 7 случайных = 9 цифр
+GEN_PREFIXES = ["67", "68", "77", "96", "97", "98", "39", "50", "66", "95", "99", "75", "63", "73", "93"]
 
 
 # ---------- parsing helpers ----------
@@ -116,6 +120,34 @@ def fmt_duration(seconds: float) -> str:
     return f"{s}с"
 
 
+def generate_numbers_9digits(count: int, prefixes=None):
+    """
+    Генерирует уникальные номера в формате 9 цифр:
+    [prefix 2 цифры] + [7 случайных цифр].
+    """
+    prefixes = prefixes or GEN_PREFIXES
+    count = max(1, int(count))
+
+    # максимальная возможная уникальность = len(prefixes) * 10^7
+    max_possible = len(prefixes) * 10_000_000
+    if count > max_possible:
+        raise ValueError("Запрошено занадто багато унікальних номерів для заданих префіксів.")
+
+    out = []
+    used = set()
+
+    while len(out) < count:
+        pref = random.choice(prefixes)
+        tail = f"{random.randint(0, 9_999_999):07d}"
+        num = pref + tail  # 9 digits
+        if num in used:
+            continue
+        used.add(num)
+        out.append(num)
+
+    return out
+
+
 class App:
     def __init__(self, root):
         self.root = root
@@ -130,8 +162,12 @@ class App:
         self.order = tk.StringVar(value="start")
         self.keep_non_numbers = tk.BooleanVar(value=True)
 
-        # ✅ НОВЕ: галочка для RegSoon
+        # ✅ RegSoon toggle
         self.write_regsoon = tk.BooleanVar(value=True)
+
+        # ✅ НОВЕ: генерация номеров
+        self.use_generator = tk.BooleanVar(value=False)
+        self.gen_count = tk.IntVar(value=100)  # сколько генерировать
 
         self.mode = tk.StringVar(value="speed")  # speed / accuracy / custom
         self.custom_seconds = tk.DoubleVar(value=SPEED_WAIT_SECONDS)
@@ -185,12 +221,25 @@ class App:
             variable=self.keep_non_numbers
         ).pack(side="left")
 
-        # ✅ НОВЕ: RegSoon toggle
         ttk.Checkbutton(
             row00,
             text="Записувати в regsoon.txt (RegSoon)",
             variable=self.write_regsoon
         ).pack(side="left", padx=18)
+
+        # ✅ НОВЕ: блок генерации
+        row_gen = ttk.Frame(opt)
+        row_gen.pack(fill="x", padx=10, pady=6)
+
+        ttk.Checkbutton(
+            row_gen,
+            text="Генерувати номери автоматично (замість numbers.txt)",
+            variable=self.use_generator
+        ).pack(side="left")
+
+        ttk.Label(row_gen, text="Скільки:").pack(side="left", padx=(14, 6))
+        ttk.Spinbox(row_gen, from_=1, to=500000, width=10, textvariable=self.gen_count).pack(side="left")
+        ttk.Label(row_gen, text="(префікси: " + ", ".join(GEN_PREFIXES) + ")").pack(side="left", padx=10)
 
         row1 = ttk.Frame(opt)
         row1.pack(fill="x", padx=10, pady=6)
@@ -338,7 +387,6 @@ class App:
         wait.until(EC.element_to_be_clickable((By.ID, "msisdn")))
         return wait
 
-    # back/client НЕ трогаем
     def back_to_home_and_open_client(self, driver):
         if driver.find_elements(By.ID, "msisdn"):
             return self.wait_msisdn_ready(driver)
@@ -357,10 +405,6 @@ class App:
         return self.wait_msisdn_ready(driver)
 
     def wait_search_ready(self, driver, timeout=WAIT_UI_SECONDS) -> bool:
-        """
-        Чекає, поки кнопка 'Пошук' стане активною (без mat-button-disabled).
-        Також прибирає екран 'Помилка' якщо виліз.
-        """
         end = time.time() + timeout
         while time.time() < end:
             if self.stop_event.is_set():
@@ -402,8 +446,6 @@ class App:
             el.dispatchEvent(new Event('change',{bubbles:true}));
             """, inp, full
         )
-
-        # ✅ вместо фиксированного sleep — ждём, пока "Пошук" станет активной
         self.wait_search_ready(driver, timeout=3)
 
     def click_search(self, driver, wait):
@@ -465,7 +507,6 @@ class App:
         return False
 
     def wait_services_only_fast(self, driver, wait_seconds: float) -> bool:
-        # быстрый шанс сразу
         self.handle_error_screen_once(driver)
         if self.js_has_label_text(driver, "Реєстрація послуг"):
             return True
@@ -531,14 +572,33 @@ class App:
     # ---------- MAIN ----------
 
     def run(self):
-        lines, items = load_lines_with_numbers(NUMBERS_FILE)
-        if not items:
-            messagebox.showerror("Помилка", "numbers.txt не містить жодного валідного номера")
-            self.btn_start.configure(state="normal")
-            self.btn_stop.configure(state="disabled")
-            return
+        # ✅ Источник номеров: генератор или файл
+        if self.use_generator.get():
+            try:
+                cnt = int(self.gen_count.get())
+            except Exception:
+                cnt = 100
 
-        items_iter = list(reversed(items)) if self.order.get() == "end" else list(items)
+            try:
+                gen_nums = generate_numbers_9digits(cnt, GEN_PREFIXES)
+            except Exception as e:
+                messagebox.showerror("Помилка", f"Не вдалося згенерувати номери: {e}")
+                self.btn_start.configure(state="normal")
+                self.btn_stop.configure(state="disabled")
+                return
+
+            # в режиме генератора numbers.txt не трогаем (чтобы случайно не перезатирать)
+            lines = []
+            items_iter = [{"idx": i, "line": n, "number": n} for i, n in enumerate(gen_nums)]
+            self.log(f"🧩 Генератор увімкнено: згенеровано {len(items_iter)} номерів. Напр.: 380{items_iter[0]['number']}")
+        else:
+            lines, items = load_lines_with_numbers(NUMBERS_FILE)
+            if not items:
+                messagebox.showerror("Помилка", "numbers.txt не містить жодного валідного номера")
+                self.btn_start.configure(state="normal")
+                self.btn_stop.configure(state="disabled")
+                return
+            items_iter = list(reversed(items)) if self.order.get() == "end" else list(items)
 
         to_delete_numbers = set()
         valid_buf = []
@@ -564,7 +624,7 @@ class App:
         options.add_argument("--metrics-recording-only")
         options.add_argument("--disable-features=Translate,BackForwardCache")
 
-        # ✅ GPU флаги (как было)
+        # ✅ GPU флаги
         options.add_argument("--use-gl=angle")
         options.add_argument("--use-angle=default")
         options.add_argument("--enable-gpu-rasterization")
@@ -601,7 +661,6 @@ class App:
                     wait = self.back_to_home_and_open_client(driver)
                     self.set_number_safe(driver, wait, number)
 
-                    # на всякий случай: если "Пошук" ещё disabled — подождём
                     self.wait_search_ready(driver, timeout=3)
 
                     self.click_search(driver, wait)
@@ -667,10 +726,19 @@ class App:
                 self.ui_update_eta()
                 time.sleep(pause)
 
-                if i % save_every == 0:
+                # ✅ checkpoints только если работаем с numbers.txt (иначе нечего переписывать)
+                if (not self.use_generator.get()) and (i % save_every == 0):
                     self.checkpoint_save(lines, to_delete_numbers, valid_buf)
 
-            self.checkpoint_save(lines, to_delete_numbers, valid_buf)
+            # финальный checkpoint
+            if not self.use_generator.get():
+                self.checkpoint_save(lines, to_delete_numbers, valid_buf)
+            else:
+                # в режиме генератора сохраняем valid.txt пачкой (чтобы не терять)
+                if valid_buf:
+                    append_lines(VALID_FILE, valid_buf)
+                    valid_buf.clear()
+                    self.log("💾 Збережено valid.txt (режим генератора)")
 
         finally:
             try:
