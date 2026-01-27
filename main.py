@@ -193,7 +193,7 @@ class App:
         # ---- State vars
         self.status_text = tk.StringVar(value="Готово")
 
-        # ✅ default = reliable
+        # default = reliable
         self.mode = tk.StringVar(value="accuracy")  # speed / accuracy / custom
         self.custom_seconds = tk.DoubleVar(value=ACCURACY_WAIT_SECONDS)
 
@@ -216,7 +216,8 @@ class App:
 
         self.valid_count = 0
         self.skipped_count = 0
-        self.already_count = 0
+        self.regsoon_count = 0  # ✅ instead of "already"
+        self.already_count = 0  # internal counter stays (if you still want it in cards/logs)
 
         self.run_started_at = None
         self.done_count = 0
@@ -305,12 +306,12 @@ class App:
         badges_frame.pack(fill="x", pady=(0, 10))
 
         self._c_valid_bg = "#1F9D55"
-        self._c_already_bg = "#D9A400"
+        self._c_regsoon_bg = "#D9A400"   # ✅ yellow for regsoon
         self._c_skip_bg = "#6B7280"
         self._c_badge_fg = "#FFFFFF"
 
         self.badge_valid_var = tk.StringVar(value="VALID: 0")
-        self.badge_already_var = tk.StringVar(value="ALREADY: 0")
+        self.badge_regsoon_var = tk.StringVar(value="REGSOON: 0")  # ✅
         self.badge_skip_var = tk.StringVar(value="SKIP: 0")
 
         self.badge_valid = tk.Label(
@@ -318,9 +319,9 @@ class App:
             bg=self._c_valid_bg, fg=self._c_badge_fg,
             font=("Segoe UI", 10, "bold"), padx=12, pady=6, cursor="hand2"
         )
-        self.badge_already = tk.Label(
-            badges_frame, textvariable=self.badge_already_var,
-            bg=self._c_already_bg, fg=self._c_badge_fg,
+        self.badge_regsoon = tk.Label(
+            badges_frame, textvariable=self.badge_regsoon_var,
+            bg=self._c_regsoon_bg, fg=self._c_badge_fg,
             font=("Segoe UI", 10, "bold"), padx=12, pady=6, cursor="hand2"
         )
         self.badge_skip = tk.Label(
@@ -330,11 +331,12 @@ class App:
         )
 
         self.badge_valid.pack(side="left")
-        self.badge_already.pack(side="left", padx=10)
+        self.badge_regsoon.pack(side="left", padx=10)
         self.badge_skip.pack(side="left")
 
+        # click actions
         self.badge_valid.bind("<Button-1>", lambda e: self.open_valid_file())
-        self.badge_already.bind("<Button-1>", lambda e: self.open_valid_file())
+        self.badge_regsoon.bind("<Button-1>", lambda e: self.open_regsoon_file())
         self.badge_skip.bind("<Button-1>", lambda e: self.open_numbers_file())
 
         # ---- stat cards row
@@ -343,12 +345,12 @@ class App:
 
         self.card_valid = self._stat_card(row, "VALID", "0")
         self.card_skip = self._stat_card(row, "Пропущено", "0")
-        self.card_already = self._stat_card(row, "Вже зареєстр.", "0")
+        self.card_regsoon = self._stat_card(row, "RegSoon", "0")   # ✅ replaces “already” card
         self.card_rate = self._stat_card(row, "Середній/номер", "-")
 
         self.card_valid.pack(side="left", fill="x", expand=True, padx=(0, 10))
         self.card_skip.pack(side="left", fill="x", expand=True, padx=(0, 10))
-        self.card_already.pack(side="left", fill="x", expand=True, padx=(0, 10))
+        self.card_regsoon.pack(side="left", fill="x", expand=True, padx=(0, 10))
         self.card_rate.pack(side="left", fill="x", expand=True)
 
         prog = ttk.LabelFrame(self.tab_run, text="Прогрес", style="Card.TLabelframe")
@@ -586,7 +588,7 @@ class App:
     def _update_badges(self):
         def _u():
             self.badge_valid_var.set(f"VALID: {self.valid_count}")
-            self.badge_already_var.set(f"ALREADY: {self.already_count}")
+            self.badge_regsoon_var.set(f"REGSOON: {self.regsoon_count}")
             self.badge_skip_var.set(f"SKIP: {self.skipped_count}")
         self.root.after(0, _u)
 
@@ -594,7 +596,7 @@ class App:
         def _u():
             self.card_valid._num.configure(text=str(self.valid_count))
             self.card_skip._num.configure(text=str(self.skipped_count))
-            self.card_already._num.configure(text=str(self.already_count))
+            self.card_regsoon._num.configure(text=str(self.regsoon_count))
             self.card_rate._num.configure(text=str(avg_text))
         self.root.after(0, _u)
         self._update_badges()
@@ -918,7 +920,9 @@ class App:
 
         self.valid_count = 0
         self.skipped_count = 0
+        self.regsoon_count = 0
         self.already_count = 0
+
         self.done_count = 0
         self.total_count = 0
         self.run_started_at = time.time()
@@ -927,7 +931,6 @@ class App:
         self._set_status("Працюю…")
         self._log("▶ Запуск…")
 
-        # apply prefixes once on start (safe)
         self.apply_prefixes(silent=True)
 
         self.worker = threading.Thread(target=self.run, daemon=True)
@@ -947,12 +950,10 @@ class App:
         save_every = self.get_save_every_n()
         wait_seconds = self.get_services_wait()
 
-        # setup chrome
         options = webdriver.ChromeOptions()
         options.add_argument("--disable-notifications")
         options.add_argument("--start-maximized")
 
-        # speed flags (без вимкнення картинок)
         options.add_argument("--disable-extensions")
         options.add_argument("--disable-background-networking")
         options.add_argument("--disable-default-apps")
@@ -960,7 +961,6 @@ class App:
         options.add_argument("--metrics-recording-only")
         options.add_argument("--disable-features=Translate,BackForwardCache")
 
-        # gpu flags
         options.add_argument("--use-gl=angle")
         options.add_argument("--use-angle=default")
         options.add_argument("--enable-gpu-rasterization")
@@ -986,10 +986,9 @@ class App:
             )))
             self._log("✅ Авторизація OK")
 
-            # choose mode
             generator_mode = bool(self.use_generator.get())
             if generator_mode:
-                self.total_count = 0  # infinite
+                self.total_count = 0
                 self._log("🧩 Режим генератора: нескінченно, доки не натиснеш Stop або не знімеш галочку.")
             else:
                 self.file_lines, items = load_lines_with_numbers(NUMBERS_FILE)
@@ -1001,13 +1000,10 @@ class App:
                 self.total_count = len(items_iter)
                 self.to_delete_numbers = set()
 
-            # init UI progress
             self._update_progress(0, self.total_count)
             self.run_started_at = time.time()
 
-            # main loop helper
             def process_one(number: str, line_info: str = ""):
-                # stop if generator checkbox turned off mid-run
                 if generator_mode and not self.use_generator.get():
                     self._log("🛑 Галочка генератора знята — зупиняю.")
                     self.stop_event.set()
@@ -1017,15 +1013,11 @@ class App:
                     return False
 
                 self._set_status(f"380{number}")
-                if line_info:
-                    self._log(f"→ 380{number} | рядок: {line_info}")
-                else:
-                    self._log(f"→ 380{number}")
+                self._log(f"→ 380{number}" + (f" | рядок: {line_info}" if line_info else ""))
 
                 wait = self.back_to_home_and_open_client(driver)
                 self.set_number_safe(driver, wait, number)
 
-                # чекати активну кнопку
                 if not self.wait_search_ready(driver, timeout=WAIT_UI_SECONDS):
                     self.skipped_count += 1
                     self._log("  ⚠ Пошук не активувався → пропуск")
@@ -1038,26 +1030,25 @@ class App:
                 services = self.wait_services_only_fast(driver, wait_seconds)
                 has_start_pack = self.has_start_pack_fast(driver)
 
-                # 🟡 ВАРІАНТ: є стартовий пакет, але нема "Реєстрація послуг"
+                # ✅ REGSOON
                 if has_start_pack and not services:
                     if self.write_regsoon.get():
                         with open(REGSOON_FILE, "a", encoding="utf-8") as f:
                             f.write(number + "\n")
-                        self._log("  🕒 Є «Реєстрація стартового пакету», але нема «Реєстрація послуг» → RegSoon")
+                        self.regsoon_count += 1
+                        self._log("  🕒 RegSoon: є старт.пакет, але нема «Реєстрація послуг» → записав у regsoon.txt")
                     else:
-                        self._log("  🕒 Є «Реєстрація стартового пакету», але нема «Реєстрація послуг» → пропуск (RegSoon вимкнено)")
-                    self.skipped_count += 1
+                        self._log("  🕒 RegSoon умова спрацювала, але запис вимкнено → пропуск")
+                        self.skipped_count += 1
                     self._update_eta()
                     return True
 
-                # ❌ нема "Реєстрація послуг" і нема стартового пакету
                 if (not services) and (not has_start_pack):
                     self.skipped_count += 1
                     self._log("  ⏭ пропуск (нема «Реєстрація послуг» і нема старт.пакету)")
                     self._update_eta()
                     return True
 
-                # ✅ нормальна реєстрація
                 if services and has_start_pack:
                     self.click_start_pack(driver)
                     time.sleep(0.18)
@@ -1071,6 +1062,7 @@ class App:
                         pass
 
                     if already:
+                        # мы больше не показываем это на бейдже, но логика пусть остаётся
                         self.already_count += 1
                         self._log("  🟡 Номер вже було зареєстровано → видалити з numbers.txt")
                         if not generator_mode:
@@ -1085,13 +1077,11 @@ class App:
                     self._update_eta()
                     return True
 
-                # ⚠ інші комбінації
                 self.skipped_count += 1
                 self._log("  ⏭ незрозумілий стан → пропуск")
                 self._update_eta()
                 return True
 
-            # ---- RUN (file or generator)
             if generator_mode:
                 i = 0
                 while not self.stop_event.is_set():
@@ -1108,20 +1098,10 @@ class App:
                     if i % save_every == 0:
                         self.checkpoint_save_generator()
 
-                # final save for generator
                 self.checkpoint_save_generator()
 
             else:
-                items_iter = list(reversed(load_lines_with_numbers(NUMBERS_FILE)[1])) if self.order.get() == "end" else load_lines_with_numbers(NUMBERS_FILE)[1]
-                # use already loaded items (avoid re-reading): rebuild from self.file_lines to keep stable mapping
-                # better: iterate using the items we loaded earlier; but we already set total_count based on items_iter above.
-                # We'll re-load for safety in case file changed; if you don't want that, delete 3 lines above and keep the earlier 'items_iter'.
-                # For now: keep it consistent with the file content we started with:
-                _, items = load_lines_with_numbers(NUMBERS_FILE)
                 items_iter = list(reversed(items)) if self.order.get() == "end" else list(items)
-                self.total_count = len(items_iter)
-                self._update_progress(0, self.total_count)
-
                 for idx, it in enumerate(items_iter, 1):
                     if self.stop_event.is_set():
                         break
@@ -1139,7 +1119,6 @@ class App:
                     if idx % save_every == 0:
                         self.checkpoint_save_filemode()
 
-                # final save for file mode
                 self.checkpoint_save_filemode()
 
         except Exception as e:
