@@ -31,7 +31,7 @@ POLL = 0.05
 SPEED_WAIT_SECONDS = 1.7
 ACCURACY_WAIT_SECONDS = 1.8
 
-GEN_PREFIXES = ["67", "68", "77", "96", "97", "98", "39", "50", "66", "95", "99", "75", "63", "73", "93"]
+DEFAULT_PREFIXES = ["67", "68", "77", "96", "97", "98", "39", "50", "66", "95", "99", "75", "63", "73", "93"]
 
 
 # =======================
@@ -125,7 +125,6 @@ def fmt_duration(seconds: float) -> str:
 
 
 def open_folder(path: str):
-    """Cross-platform open folder in OS file manager."""
     path = os.path.abspath(path)
     try:
         if sys.platform.startswith("win"):
@@ -135,16 +134,47 @@ def open_folder(path: str):
         else:
             subprocess.Popen(["xdg-open", path])
     except Exception:
-        # fallback: open current working dir
+        pass
+
+
+def open_file_in_default_app(filepath: str):
+    filepath = os.path.abspath(filepath)
+    if not os.path.exists(filepath):
         try:
-            if sys.platform.startswith("win"):
-                os.startfile(os.getcwd())  # type: ignore[attr-defined]
-            elif sys.platform == "darwin":
-                subprocess.Popen(["open", os.getcwd()])
-            else:
-                subprocess.Popen(["xdg-open", os.getcwd()])
+            with open(filepath, "a", encoding="utf-8"):
+                pass
         except Exception:
-            pass
+            return
+    try:
+        if sys.platform.startswith("win"):
+            os.startfile(filepath)  # type: ignore[attr-defined]
+        elif sys.platform == "darwin":
+            subprocess.Popen(["open", filepath])
+        else:
+            subprocess.Popen(["xdg-open", filepath])
+    except Exception:
+        pass
+
+
+def parse_prefixes(raw: str):
+    """
+    Accepts: "67,68 77;96" etc.
+    Returns list of unique 2-digit prefixes (strings), preserving order.
+    """
+    raw = (raw or "").strip()
+    if not raw:
+        return []
+
+    parts = re.split(r"[,\s;|/]+", raw)
+    out = []
+    seen = set()
+    for p in parts:
+        p = re.sub(r"\D+", "", p.strip())
+        if len(p) == 2 and p.isdigit():
+            if p not in seen:
+                seen.add(p)
+                out.append(p)
+    return out
 
 
 # =======================
@@ -158,12 +188,14 @@ class App:
         self.root.geometry("1180x860")
         self.root.minsize(1080, 760)
 
-        self._apply_theme()
+        self._apply_win11_theme()
 
         # ---- State vars
         self.status_text = tk.StringVar(value="Готово")
-        self.mode = tk.StringVar(value="speed")  # speed / accuracy / custom
-        self.custom_seconds = tk.DoubleVar(value=SPEED_WAIT_SECONDS)
+
+        # ✅ default = reliable
+        self.mode = tk.StringVar(value="accuracy")  # speed / accuracy / custom
+        self.custom_seconds = tk.DoubleVar(value=ACCURACY_WAIT_SECONDS)
 
         self.pause_seconds = tk.DoubleVar(value=0.3)
         self.save_every_n = tk.IntVar(value=20)
@@ -172,9 +204,11 @@ class App:
         self.keep_non_numbers = tk.BooleanVar(value=True)
 
         self.write_regsoon = tk.BooleanVar(value=True)
-
-        # generator infinite
         self.use_generator = tk.BooleanVar(value=False)
+
+        # prefixes input
+        self.prefixes_text = tk.StringVar(value=", ".join(DEFAULT_PREFIXES))
+        self.prefixes_list = list(DEFAULT_PREFIXES)
 
         # runtime
         self.stop_event = threading.Event()
@@ -200,15 +234,17 @@ class App:
         self._build_ui()
 
     # =======================
-    # THEME / STYLES
+    # THEME / STYLES (Win11-ish)
     # =======================
-    def _apply_theme(self):
+    def _apply_win11_theme(self):
         self.style = ttk.Style(self.root)
-        # "clam" is more reliable for ttk styling; prefer it if present
-        if "clam" in self.style.theme_names():
-            self.style.theme_use("clam")
-        elif "vista" in self.style.theme_names():
+
+        if sys.platform.startswith("win") and "vista" in self.style.theme_names():
             self.style.theme_use("vista")
+        elif "clam" in self.style.theme_names():
+            self.style.theme_use("clam")
+
+        self.root.option_add("*Font", ("Segoe UI", 10))
 
         self.style.configure("H1.TLabel", font=("Segoe UI", 18, "bold"))
         self.style.configure("H2.TLabel", font=("Segoe UI", 12, "bold"))
@@ -221,8 +257,12 @@ class App:
 
         self.style.configure("StatNum.TLabel", font=("Segoe UI", 16, "bold"))
         self.style.configure("StatCap.TLabel", font=("Segoe UI", 10))
-
         self.style.configure("Pill.TLabel", font=("Segoe UI", 10, "bold"), padding=(10, 4))
+
+        try:
+            self.style.configure("TNotebook.Tab", padding=(14, 8))
+        except Exception:
+            pass
 
     # =======================
     # UI BUILD
@@ -235,11 +275,10 @@ class App:
         left.pack(side="left", fill="x", expand=True)
 
         ttk.Label(left, text="Firk", style="H1.TLabel").pack(anchor="w")
-        ttk.Label(left, text="Автоматизація перевірки/реєстрації • швидкий режим роботи", style="Muted.TLabel").pack(anchor="w", pady=(2, 0))
+        ttk.Label(left, text="Автоматизація перевірки/реєстрації • Win11 UI", style="Muted.TLabel").pack(anchor="w", pady=(2, 0))
 
         right = ttk.Frame(header)
         right.pack(side="right")
-
         self.pill = ttk.Label(right, textvariable=self.status_text, style="Pill.TLabel")
         self.pill.pack(anchor="e")
 
@@ -261,14 +300,13 @@ class App:
         self._set_running_ui(False)
 
     def _build_run_tab(self):
-        # ---- colored badges row (tk widgets for reliable bg colors)
+        # ---- colored badges row (clickable)
         badges_frame = ttk.Frame(self.tab_run)
         badges_frame.pack(fill="x", pady=(0, 10))
 
-        # colors (nice, not neon)
-        self._c_valid_bg = "#1F9D55"   # green
-        self._c_already_bg = "#D9A400" # yellow
-        self._c_skip_bg = "#6B7280"    # gray
+        self._c_valid_bg = "#1F9D55"
+        self._c_already_bg = "#D9A400"
+        self._c_skip_bg = "#6B7280"
         self._c_badge_fg = "#FFFFFF"
 
         self.badge_valid_var = tk.StringVar(value="VALID: 0")
@@ -278,23 +316,26 @@ class App:
         self.badge_valid = tk.Label(
             badges_frame, textvariable=self.badge_valid_var,
             bg=self._c_valid_bg, fg=self._c_badge_fg,
-            font=("Segoe UI", 10, "bold"), padx=12, pady=6
+            font=("Segoe UI", 10, "bold"), padx=12, pady=6, cursor="hand2"
         )
         self.badge_already = tk.Label(
             badges_frame, textvariable=self.badge_already_var,
             bg=self._c_already_bg, fg=self._c_badge_fg,
-            font=("Segoe UI", 10, "bold"), padx=12, pady=6
+            font=("Segoe UI", 10, "bold"), padx=12, pady=6, cursor="hand2"
         )
         self.badge_skip = tk.Label(
             badges_frame, textvariable=self.badge_skip_var,
             bg=self._c_skip_bg, fg=self._c_badge_fg,
-            font=("Segoe UI", 10, "bold"), padx=12, pady=6
+            font=("Segoe UI", 10, "bold"), padx=12, pady=6, cursor="hand2"
         )
 
-        # rounded corners not supported in tk.Label, but padding + colors look good
         self.badge_valid.pack(side="left")
         self.badge_already.pack(side="left", padx=10)
         self.badge_skip.pack(side="left")
+
+        self.badge_valid.bind("<Button-1>", lambda e: self.open_valid_file())
+        self.badge_already.bind("<Button-1>", lambda e: self.open_valid_file())
+        self.badge_skip.bind("<Button-1>", lambda e: self.open_numbers_file())
 
         # ---- stat cards row
         row = ttk.Frame(self.tab_run)
@@ -337,14 +378,16 @@ class App:
         self.btn_start.pack(side="left")
         self.btn_stop.pack(side="left", padx=10)
 
-        # ✅ Open folder button
-        ttk.Button(btnrow, text="📁 Відкрити папку з файлами", command=self.open_files_folder).pack(side="left", padx=10)
+        ttk.Button(btnrow, text="📁 Папка", command=self.open_files_folder).pack(side="left", padx=(10, 6))
+        ttk.Button(btnrow, text="📄 valid.txt", command=self.open_valid_file).pack(side="left", padx=6)
+        ttk.Button(btnrow, text="🕒 regsoon.txt", command=self.open_regsoon_file).pack(side="left", padx=6)
+        ttk.Button(btnrow, text="🧾 numbers.txt", command=self.open_numbers_file).pack(side="left", padx=6)
 
         ttk.Button(btnrow, text="Очистити логи", command=self.clear_logs).pack(side="right")
 
         hint = (
-            "Порада: у режимі генератора прогрес нескінченний (∞). "
-            "Щоб зупинити — натисни Стоп або зніми галочку “Генерувати номери”."
+            "Генератор працює нескінченно, поки увімкнена галочка “Генерувати номери”. "
+            "Зупинка: Stop або зняти галочку."
         )
         ttk.Label(actions, text=hint, style="Muted.TLabel", wraplength=980).pack(anchor="w", pady=(10, 0))
 
@@ -367,7 +410,22 @@ class App:
             variable=self.use_generator
         ).pack(anchor="w")
 
-        ttk.Label(src, text=f"Префікси: {', '.join(GEN_PREFIXES)}", style="Muted.TLabel", wraplength=520).pack(anchor="w", pady=(6, 0))
+        prefbox = ttk.LabelFrame(left, text="Префікси генератора", style="Card.TLabelframe")
+        prefbox.pack(fill="x", pady=(0, 10))
+
+        ttk.Label(prefbox, text="Впиши префікси (2 цифри) через кому/пробіл:", style="Muted.TLabel").pack(anchor="w")
+        rowp = ttk.Frame(prefbox)
+        rowp.pack(fill="x", pady=(6, 0))
+
+        self.prefix_entry = ttk.Entry(rowp, textvariable=self.prefixes_text)
+        self.prefix_entry.pack(side="left", fill="x", expand=True)
+
+        ttk.Button(rowp, text="Застосувати", command=self.apply_prefixes).pack(side="left", padx=10)
+
+        self.prefix_hint = ttk.Label(prefbox, text=f"Поточні: {', '.join(self.prefixes_list)}", style="Muted.TLabel", wraplength=520)
+        self.prefix_hint.pack(anchor="w", pady=(6, 0))
+
+        self.prefix_entry.bind("<FocusOut>", lambda e: self.apply_prefixes(silent=True))
 
         filebox = ttk.LabelFrame(left, text="numbers.txt", style="Card.TLabelframe")
         filebox.pack(fill="x", pady=(0, 10))
@@ -452,14 +510,47 @@ class App:
         return lf
 
     # =======================
-    # UI UTIL
+    # File open actions
     # =======================
     def open_files_folder(self):
-        # Folder where the script is run (and where txt files are expected)
         folder = os.path.abspath(os.getcwd())
         self._log(f"📁 Відкриваю папку: {folder}")
         open_folder(folder)
 
+    def open_valid_file(self):
+        self._log("📄 Відкриваю valid.txt")
+        open_file_in_default_app(VALID_FILE)
+
+    def open_regsoon_file(self):
+        self._log("🕒 Відкриваю regsoon.txt")
+        open_file_in_default_app(REGSOON_FILE)
+
+    def open_numbers_file(self):
+        self._log("🧾 Відкриваю numbers.txt")
+        open_file_in_default_app(NUMBERS_FILE)
+
+    # =======================
+    # Prefixes apply
+    # =======================
+    def apply_prefixes(self, silent: bool = False):
+        parsed = parse_prefixes(self.prefixes_text.get())
+        if not parsed:
+            if not silent:
+                messagebox.showwarning("Префікси", "Нема валідних префіксів (треба 2 цифри). Повертаю дефолтні.")
+            self.prefixes_list = list(DEFAULT_PREFIXES)
+            self.prefixes_text.set(", ".join(self.prefixes_list))
+        else:
+            self.prefixes_list = parsed
+
+        try:
+            self.prefix_hint.configure(text=f"Поточні: {', '.join(self.prefixes_list)}")
+        except Exception:
+            pass
+        self._log(f"🔧 Префікси генератора: {', '.join(self.prefixes_list)}")
+
+    # =======================
+    # UI UTIL
+    # =======================
     def _set_running_ui(self, running: bool):
         def _u():
             if running:
@@ -506,7 +597,6 @@ class App:
             self.card_already._num.configure(text=str(self.already_count))
             self.card_rate._num.configure(text=str(avg_text))
         self.root.after(0, _u)
-
         self._update_badges()
 
     def _update_progress(self, done: int, total: int):
@@ -575,7 +665,7 @@ class App:
                 return ACCURACY_WAIT_SECONDS
             return max(0.3, float(self.custom_seconds.get()))
         except Exception:
-            return SPEED_WAIT_SECONDS
+            return ACCURACY_WAIT_SECONDS
 
     def get_pause(self):
         try:
@@ -785,8 +875,10 @@ class App:
         if len(self.gen_recent) > 200_000:
             self.gen_recent.clear()
 
+        prefs = self.prefixes_list if self.prefixes_list else DEFAULT_PREFIXES
+
         while True:
-            pref = random.choice(GEN_PREFIXES)
+            pref = random.choice(prefs)
             tail = f"{random.randint(0, 9_999_999):07d}"
             num = pref + tail
             if num not in self.gen_recent:
@@ -827,19 +919,19 @@ class App:
         self.valid_count = 0
         self.skipped_count = 0
         self.already_count = 0
-
         self.done_count = 0
         self.total_count = 0
         self.run_started_at = time.time()
 
         self._update_cards("-")
-        self._update_progress(0, 0)
         self._set_status("Працюю…")
         self._log("▶ Запуск…")
 
+        # apply prefixes once on start (safe)
+        self.apply_prefixes(silent=True)
+
         self.worker = threading.Thread(target=self.run, daemon=True)
         self.worker.start()
-
         self.nb.select(self.tab_run)
 
     def stop(self):
@@ -855,10 +947,12 @@ class App:
         save_every = self.get_save_every_n()
         wait_seconds = self.get_services_wait()
 
+        # setup chrome
         options = webdriver.ChromeOptions()
         options.add_argument("--disable-notifications")
         options.add_argument("--start-maximized")
 
+        # speed flags (без вимкнення картинок)
         options.add_argument("--disable-extensions")
         options.add_argument("--disable-background-networking")
         options.add_argument("--disable-default-apps")
@@ -866,6 +960,7 @@ class App:
         options.add_argument("--metrics-recording-only")
         options.add_argument("--disable-features=Translate,BackForwardCache")
 
+        # gpu flags
         options.add_argument("--use-gl=angle")
         options.add_argument("--use-angle=default")
         options.add_argument("--enable-gpu-rasterization")
@@ -892,7 +987,8 @@ class App:
             self._log("✅ Авторизація OK")
 
             # choose mode
-            if self.use_generator.get():
+            generator_mode = bool(self.use_generator.get())
+            if generator_mode:
                 self.total_count = 0  # infinite
                 self._log("🧩 Режим генератора: нескінченно, доки не натиснеш Stop або не знімеш галочку.")
             else:
@@ -900,175 +996,154 @@ class App:
                 if not items:
                     self.root.after(0, lambda: messagebox.showerror("Помилка", "numbers.txt не містить жодного валідного номера"))
                     return
+
                 items_iter = list(reversed(items)) if self.order.get() == "end" else list(items)
                 self.total_count = len(items_iter)
                 self.to_delete_numbers = set()
-                self._log(f"📄 Режим numbers.txt: завантажено {self.total_count} номерів")
 
-            self.done_count = 0
+            # init UI progress
             self._update_progress(0, self.total_count)
-            self._update_eta()
+            self.run_started_at = time.time()
 
-            # --------------------------
-            # GENERATOR MODE (infinite)
-            # --------------------------
-            if self.total_count == 0:
-                i = 0
-                while (not self.stop_event.is_set()) and self.use_generator.get():
-                    i += 1
-                    number = self.gen_next_number()
+            # main loop helper
+            def process_one(number: str, line_info: str = ""):
+                # stop if generator checkbox turned off mid-run
+                if generator_mode and not self.use_generator.get():
+                    self._log("🛑 Галочка генератора знята — зупиняю.")
+                    self.stop_event.set()
+                    return False
 
-                    self.done_count = i
-                    self._update_progress(self.done_count, 0)
-                    self._set_status(f"GEN • 380{number}")
-                    self._log(f"→ 380{number} | (генератор)")
+                if self.stop_event.is_set():
+                    return False
+
+                self._set_status(f"380{number}")
+                if line_info:
+                    self._log(f"→ 380{number} | рядок: {line_info}")
+                else:
+                    self._log(f"→ 380{number}")
+
+                wait = self.back_to_home_and_open_client(driver)
+                self.set_number_safe(driver, wait, number)
+
+                # чекати активну кнопку
+                if not self.wait_search_ready(driver, timeout=WAIT_UI_SECONDS):
+                    self.skipped_count += 1
+                    self._log("  ⚠ Пошук не активувався → пропуск")
+                    self._update_eta()
+                    return True
+
+                self.click_search(driver, wait)
+                self.handle_error_screen_once(driver)
+
+                services = self.wait_services_only_fast(driver, wait_seconds)
+                has_start_pack = self.has_start_pack_fast(driver)
+
+                # 🟡 ВАРІАНТ: є стартовий пакет, але нема "Реєстрація послуг"
+                if has_start_pack and not services:
+                    if self.write_regsoon.get():
+                        with open(REGSOON_FILE, "a", encoding="utf-8") as f:
+                            f.write(number + "\n")
+                        self._log("  🕒 Є «Реєстрація стартового пакету», але нема «Реєстрація послуг» → RegSoon")
+                    else:
+                        self._log("  🕒 Є «Реєстрація стартового пакету», але нема «Реєстрація послуг» → пропуск (RegSoon вимкнено)")
+                    self.skipped_count += 1
+                    self._update_eta()
+                    return True
+
+                # ❌ нема "Реєстрація послуг" і нема стартового пакету
+                if (not services) and (not has_start_pack):
+                    self.skipped_count += 1
+                    self._log("  ⏭ пропуск (нема «Реєстрація послуг» і нема старт.пакету)")
+                    self._update_eta()
+                    return True
+
+                # ✅ нормальна реєстрація
+                if services and has_start_pack:
+                    self.click_start_pack(driver)
+                    time.sleep(0.18)
+                    self.click_register(driver)
+
+                    already = self.wait_already_error_short_fast(driver, seconds=1.1)
 
                     try:
-                        wait = self.back_to_home_and_open_client(driver)
-                        self.set_number_safe(driver, wait, number)
-                        self.wait_search_ready(driver, timeout=3)
-                        self.click_search(driver, wait)
+                        self.click_ok_anywhere(driver, timeout=4)
+                    except Exception:
+                        pass
 
-                        self.handle_error_screen_once(driver)
+                    if already:
+                        self.already_count += 1
+                        self._log("  🟡 Номер вже було зареєстровано → видалити з numbers.txt")
+                        if not generator_mode:
+                            self.to_delete_numbers.add(number)
+                    else:
+                        self.valid_count += 1
+                        self._log("  ✔ Зареєстровано (VALID) → видалити з numbers.txt")
+                        self.valid_buf.append(number)
+                        if not generator_mode:
+                            self.to_delete_numbers.add(number)
 
-                        services = self.wait_services_only_fast(driver, wait_seconds)
-                        has_start_pack = self.has_start_pack_fast(driver)
-
-                        # 🟡 Є стартпак, але немає "Реєстрація послуг" -> RegSoon (optional)
-                        if has_start_pack and not services:
-                            if self.write_regsoon.get():
-                                with open(REGSOON_FILE, "a", encoding="utf-8") as f:
-                                    f.write(number + "\n")
-                            self.skipped_count += 1
-                            self._log("  🕒 Є «Реєстрація стартового пакету», але нема «Реєстрація послуг» → RegSoon")
-
-                        # ❌ немає "Реєстрація послуг" і немає стартпаку
-                        elif (not services) and (not has_start_pack):
-                            self.skipped_count += 1
-                            self._log("  ⏭ пропуск (нема «Реєстрація послуг» і нема старт.пакету)")
-
-                        # ✅ нормальна реєстрація
-                        elif services and has_start_pack:
-                            self.click_start_pack(driver)
-                            time.sleep(0.10)
-                            self.click_register(driver)
-
-                            already = self.wait_already_error_short_fast(driver, seconds=1.1)
-
-                            try:
-                                self.click_ok_anywhere(driver, timeout=4)
-                            except Exception:
-                                pass
-
-                            if already:
-                                self.already_count += 1
-                                self._log("  🟡 Номер вже було зареєстровано")
-                            else:
-                                self.valid_count += 1
-                                self.valid_buf.append(number)
-                                self._log("  ✔ Зареєстровано (VALID)")
-
-                        else:
-                            self.skipped_count += 1
-                            self._log("  ⏭ незрозумілий стан → пропуск")
-
-                    except Exception as e:
-                        self.skipped_count += 1
-                        self._log(f"  ⚠ Помилка: {type(e).__name__}")
-
-                    self._update_cards()
                     self._update_eta()
+                    return True
+
+                # ⚠ інші комбінації
+                self.skipped_count += 1
+                self._log("  ⏭ незрозумілий стан → пропуск")
+                self._update_eta()
+                return True
+
+            # ---- RUN (file or generator)
+            if generator_mode:
+                i = 0
+                while not self.stop_event.is_set():
+                    i += 1
+                    number = self.gen_next_number()
+                    ok = process_one(number)
+                    if not ok:
+                        break
+
+                    self.done_count += 1
+                    self._update_progress(self.done_count, self.total_count)
+                    time.sleep(pause)
 
                     if i % save_every == 0:
                         self.checkpoint_save_generator()
 
-                    time.sleep(pause)
-
-                # generator end flush
+                # final save for generator
                 self.checkpoint_save_generator()
-                if not self.use_generator.get() and not self.stop_event.is_set():
-                    self._log("🛑 Генератор вимкнено (галочка знята) → зупиняю прогін.")
 
-            # --------------------------
-            # FILE MODE (numbers.txt)
-            # --------------------------
             else:
+                items_iter = list(reversed(load_lines_with_numbers(NUMBERS_FILE)[1])) if self.order.get() == "end" else load_lines_with_numbers(NUMBERS_FILE)[1]
+                # use already loaded items (avoid re-reading): rebuild from self.file_lines to keep stable mapping
+                # better: iterate using the items we loaded earlier; but we already set total_count based on items_iter above.
+                # We'll re-load for safety in case file changed; if you don't want that, delete 3 lines above and keep the earlier 'items_iter'.
+                # For now: keep it consistent with the file content we started with:
+                _, items = load_lines_with_numbers(NUMBERS_FILE)
+                items_iter = list(reversed(items)) if self.order.get() == "end" else list(items)
+                self.total_count = len(items_iter)
+                self._update_progress(0, self.total_count)
+
                 for idx, it in enumerate(items_iter, 1):
                     if self.stop_event.is_set():
                         break
 
                     number = it["number"]
-                    self.done_count = idx
+                    line_info = it.get("line", "")
+                    ok = process_one(number, line_info=line_info)
+                    if not ok:
+                        break
 
+                    self.done_count += 1
                     self._update_progress(self.done_count, self.total_count)
-                    self._set_status(f"FILE • 380{number}")
-                    self._log(f"→ 380{number} | рядок: {it['line']}")
-
-                    try:
-                        wait = self.back_to_home_and_open_client(driver)
-                        self.set_number_safe(driver, wait, number)
-                        self.wait_search_ready(driver, timeout=3)
-                        self.click_search(driver, wait)
-
-                        self.handle_error_screen_once(driver)
-
-                        services = self.wait_services_only_fast(driver, wait_seconds)
-                        has_start_pack = self.has_start_pack_fast(driver)
-
-                        # 🟡 Є стартпак, але немає "Реєстрація послуг" -> RegSoon (optional)
-                        if has_start_pack and not services:
-                            if self.write_regsoon.get():
-                                with open(REGSOON_FILE, "a", encoding="utf-8") as f:
-                                    f.write(number + "\n")
-                            self.skipped_count += 1
-                            self._log("  🕒 Є «Реєстрація стартового пакету», але нема «Реєстрація послуг» → RegSoon")
-
-                        # ❌ немає "Реєстрація послуг" і немає стартпаку
-                        elif (not services) and (not has_start_pack):
-                            self.skipped_count += 1
-                            self._log("  ⏭ пропуск (нема «Реєстрація послуг» і нема старт.пакету)")
-
-                        # ✅ нормальна реєстрація
-                        elif services and has_start_pack:
-                            self.click_start_pack(driver)
-                            time.sleep(0.10)
-                            self.click_register(driver)
-
-                            already = self.wait_already_error_short_fast(driver, seconds=1.1)
-
-                            try:
-                                self.click_ok_anywhere(driver, timeout=4)
-                            except Exception:
-                                pass
-
-                            if already:
-                                self.already_count += 1
-                                self.to_delete_numbers.add(number)
-                                self._log("  🟡 Номер вже було зареєстровано → видалити з numbers.txt")
-                            else:
-                                self.valid_count += 1
-                                self.valid_buf.append(number)
-                                self.to_delete_numbers.add(number)
-                                self._log("  ✔ Зареєстровано (VALID) → видалити з numbers.txt")
-
-                        else:
-                            self.skipped_count += 1
-                            self._log("  ⏭ незрозумілий стан → пропуск")
-
-                    except Exception as e:
-                        self.skipped_count += 1
-                        self._log(f"  ⚠ Помилка: {type(e).__name__}")
-
-                    self._update_cards()
-                    self._update_eta()
+                    time.sleep(pause)
 
                     if idx % save_every == 0:
                         self.checkpoint_save_filemode()
 
-                    time.sleep(pause)
-
+                # final save for file mode
                 self.checkpoint_save_filemode()
 
+        except Exception as e:
+            self._log(f"❌ Критична помилка: {type(e).__name__}: {e}")
         finally:
             try:
                 if driver:
