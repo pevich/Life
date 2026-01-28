@@ -13,6 +13,8 @@ from selenium.webdriver.common.by import By
 from selenium.webdriver.common.keys import Keys
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
+from selenium.common.exceptions import TimeoutException, StaleElementReferenceException, WebDriverException
+
 
 # =======================
 # CONFIG
@@ -216,8 +218,8 @@ class App:
 
         self.valid_count = 0
         self.skipped_count = 0
-        self.regsoon_count = 0  # ✅ instead of "already"
-        self.already_count = 0  # internal counter stays (if you still want it in cards/logs)
+        self.regsoon_count = 0
+        self.already_count = 0  # internal counter stays
 
         self.run_started_at = None
         self.done_count = 0
@@ -230,6 +232,10 @@ class App:
         self.file_lines = []
         self.to_delete_numbers = set()
         self.valid_buf = []
+        self.regsoon_buf = []  # turbo buffer
+
+        # turbo cache for selenium elements (resets when DOM changes)
+        self._cached = {"msisdn": None, "search_btn": None}
 
         # ---- UI
         self._build_ui()
@@ -276,7 +282,7 @@ class App:
         left.pack(side="left", fill="x", expand=True)
 
         ttk.Label(left, text="Firk", style="H1.TLabel").pack(anchor="w")
-        ttk.Label(left, text="Автоматизація перевірки/реєстрації • Win11 UI", style="Muted.TLabel").pack(anchor="w", pady=(2, 0))
+        ttk.Label(left, text="Автоматизація перевірки/реєстрації • Turbo+Stable", style="Muted.TLabel").pack(anchor="w", pady=(2, 0))
 
         right = ttk.Frame(header)
         right.pack(side="right")
@@ -301,17 +307,16 @@ class App:
         self._set_running_ui(False)
 
     def _build_run_tab(self):
-        # ---- colored badges row (clickable)
         badges_frame = ttk.Frame(self.tab_run)
         badges_frame.pack(fill="x", pady=(0, 10))
 
         self._c_valid_bg = "#1F9D55"
-        self._c_regsoon_bg = "#D9A400"   # ✅ yellow for regsoon
+        self._c_regsoon_bg = "#D9A400"
         self._c_skip_bg = "#6B7280"
         self._c_badge_fg = "#FFFFFF"
 
         self.badge_valid_var = tk.StringVar(value="VALID: 0")
-        self.badge_regsoon_var = tk.StringVar(value="REGSOON: 0")  # ✅
+        self.badge_regsoon_var = tk.StringVar(value="REGSOON: 0")
         self.badge_skip_var = tk.StringVar(value="SKIP: 0")
 
         self.badge_valid = tk.Label(
@@ -334,18 +339,16 @@ class App:
         self.badge_regsoon.pack(side="left", padx=10)
         self.badge_skip.pack(side="left")
 
-        # click actions
         self.badge_valid.bind("<Button-1>", lambda e: self.open_valid_file())
         self.badge_regsoon.bind("<Button-1>", lambda e: self.open_regsoon_file())
         self.badge_skip.bind("<Button-1>", lambda e: self.open_numbers_file())
 
-        # ---- stat cards row
         row = ttk.Frame(self.tab_run)
         row.pack(fill="x")
 
         self.card_valid = self._stat_card(row, "VALID", "0")
         self.card_skip = self._stat_card(row, "Пропущено", "0")
-        self.card_regsoon = self._stat_card(row, "RegSoon", "0")   # ✅ replaces “already” card
+        self.card_regsoon = self._stat_card(row, "RegSoon", "0")
         self.card_rate = self._stat_card(row, "Середній/номер", "-")
 
         self.card_valid.pack(side="left", fill="x", expand=True, padx=(0, 10))
@@ -388,8 +391,8 @@ class App:
         ttk.Button(btnrow, text="Очистити логи", command=self.clear_logs).pack(side="right")
 
         hint = (
-            "Генератор працює нескінченно, поки увімкнена галочка “Генерувати номери”. "
-            "Зупинка: Stop або зняти галочку."
+            "Turbo+Stable: швидші JS-перевірки + кеш елементів. "
+            "Капча працює (картинки НЕ блокуємо)."
         )
         ttk.Label(actions, text=hint, style="Muted.TLabel", wraplength=980).pack(anchor="w", pady=(10, 0))
 
@@ -652,7 +655,6 @@ class App:
                 f"ETA: {eta_txt} | Пройшло: {fmt_duration(elapsed)} | Режим: {mode_name} ({wait_s:.1f}с)"
             )
         self.root.after(0, _u)
-
         self._update_cards(avg_txt)
 
     # =======================
@@ -682,6 +684,35 @@ class App:
             return 20
 
     # =======================
+    # TURBO CACHED ELEMENT GETTERS
+    # =======================
+    def _cache_reset(self):
+        self._cached["msisdn"] = None
+        self._cached["search_btn"] = None
+
+    def get_msisdn_el(self, driver):
+        el = self._cached.get("msisdn")
+        try:
+            if el and el.is_displayed():
+                return el
+        except Exception:
+            pass
+        el = driver.find_element(By.ID, "msisdn")
+        self._cached["msisdn"] = el
+        return el
+
+    def get_search_btn_el(self, driver):
+        el = self._cached.get("search_btn")
+        try:
+            if el and el.is_displayed():
+                return el
+        except Exception:
+            pass
+        el = driver.find_element(By.XPATH, "//button[.//span[contains(@class,'mat-button-wrapper') and normalize-space(.)='Пошук']]")
+        self._cached["search_btn"] = el
+        return el
+
+    # =======================
     # SELENIUM HELPERS
     # =======================
     def js_click(self, driver, el):
@@ -705,71 +736,22 @@ class App:
         return wait
 
     def back_to_home_and_open_client(self, driver):
+        # If input exists, we're already in client search view
         if driver.find_elements(By.ID, "msisdn"):
             return self.wait_msisdn_ready(driver)
 
         backs = driver.find_elements(By.XPATH, "//button[.//mat-icon[normalize-space(text())='arrow_back']]")
         if backs:
             self.js_click(driver, backs[0])
-            time.sleep(0.12)
+            time.sleep(0.10)
             try:
                 return self.wait_msisdn_ready(driver)
             except Exception:
                 pass
 
         self.click_client(driver)
-        time.sleep(0.12)
+        time.sleep(0.10)
         return self.wait_msisdn_ready(driver)
-
-    def wait_search_ready(self, driver, timeout=WAIT_UI_SECONDS) -> bool:
-        end = time.time() + timeout
-        while time.time() < end:
-            if self.stop_event.is_set():
-                return False
-
-            self.handle_error_screen_once(driver)
-
-            btns = driver.find_elements(By.XPATH,
-                "//button[.//span[contains(@class,'mat-button-wrapper') and normalize-space(.)='Пошук']]"
-            )
-            if btns:
-                cls = (btns[0].get_attribute("class") or "")
-                if "mat-button-disabled" not in cls:
-                    return True
-            time.sleep(POLL)
-        return False
-
-    def set_number_safe(self, driver, wait, number):
-        inp = wait.until(EC.element_to_be_clickable((By.ID, "msisdn")))
-        full = "380" + number
-        try:
-            inp.click()
-            inp.send_keys(Keys.CONTROL, "a")
-            inp.send_keys(Keys.BACKSPACE)
-            time.sleep(0.05)
-        except Exception:
-            pass
-
-        driver.execute_script(
-            """
-            const el = arguments[0];
-            const v = arguments[1];
-            const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype,'value').set;
-            el.focus();
-            setter.call(el,'');
-            el.dispatchEvent(new InputEvent('input',{bubbles:true}));
-            setter.call(el,v);
-            el.dispatchEvent(new InputEvent('input',{bubbles:true}));
-            el.dispatchEvent(new Event('change',{bubbles:true}));
-            """, inp, full
-        )
-        self.wait_search_ready(driver, timeout=3)
-
-    def click_search(self, driver, wait):
-        btn = wait.until(EC.element_to_be_clickable((By.XPATH,
-            "//button[.//span[contains(@class,'mat-button-wrapper') and normalize-space(.)='Пошук']]"
-        )))
-        self.js_click(driver, btn)
 
     # ---------- FAST JS checks ----------
     def js_has_label_text(self, driver, text_value: str) -> bool:
@@ -807,20 +789,117 @@ class App:
 
     def click_ok_anywhere(self, driver, timeout=2):
         btn = WebDriverWait(driver, timeout, poll_frequency=POLL).until(
-            EC.element_to_be_clickable((By.XPATH, "//button[.//span[normalize-space(.)='Ок']]"))
+            EC.element_to_be_clickable((By.XPATH,
+                "//button[.//span[normalize-space(.)='Ок' or normalize-space(.)='ОК' or normalize-space(.)='OK' or normalize-space(.)='Добре']]"
+                " | //button[normalize-space(.)='Ок' or normalize-space(.)='ОК' or normalize-space(.)='OK' or normalize-space(.)='Добре']"
+            ))
         )
         self.js_click(driver, btn)
 
     def handle_error_screen_once(self, driver):
         if self.has_error_screen(driver):
-            self._log("  ⚠ Виявлено екран «Помилка» → натискаю Ок")
+            self._log("  ⚠ Виявлено екран «Помилка» → натискаю Ок/ОК/OK/Добре")
             try:
                 self.click_ok_anywhere(driver, timeout=2)
-                time.sleep(0.12)
+                time.sleep(0.10)
             except Exception:
                 pass
+            # DOM often changes after error OK
+            self._cache_reset()
             return True
         return False
+
+    # TURBO: wait search ready via JS (faster than find_elements loops)
+    def wait_search_ready(self, driver, timeout=WAIT_UI_SECONDS) -> bool:
+        end = time.time() + timeout
+        while time.time() < end:
+            if self.stop_event.is_set():
+                return False
+
+            self.handle_error_screen_once(driver)
+
+            ready = False
+            try:
+                ready = bool(driver.execute_script("""
+                    const btn = Array.from(document.querySelectorAll('button'))
+                      .find(b => (b.textContent || '').trim() === 'Пошук');
+                    if (!btn) return false;
+                    const cls = btn.getAttribute('class') || '';
+                    if (cls.includes('mat-button-disabled')) return false;
+                    const r = btn.getBoundingClientRect();
+                    const visible = r.width > 0 && r.height > 0;
+                    return visible && !btn.disabled;
+                """))
+            except Exception:
+                ready = False
+
+            if ready:
+                return True
+
+            time.sleep(POLL)
+        return False
+
+    def set_number_safe(self, driver, wait, number):
+        # Prefer cached element (turbo)
+        try:
+            inp = self.get_msisdn_el(driver)
+        except Exception:
+            self._cache_reset()
+            inp = wait.until(EC.element_to_be_clickable((By.ID, "msisdn")))
+            self._cached["msisdn"] = inp
+
+        full = "380" + number
+
+        # quick clear (best effort)
+        try:
+            inp.click()
+            inp.send_keys(Keys.CONTROL, "a")
+            inp.send_keys(Keys.BACKSPACE)
+            time.sleep(0.02)
+        except Exception:
+            pass
+
+        # fast JS set with input/change events (Angular-friendly)
+        try:
+            driver.execute_script(
+                """
+                const el = arguments[0];
+                const v = arguments[1];
+                const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype,'value').set;
+                el.focus();
+                setter.call(el,'');
+                el.dispatchEvent(new Event('input',{bubbles:true}));
+                setter.call(el,v);
+                el.dispatchEvent(new Event('input',{bubbles:true}));
+                el.dispatchEvent(new Event('change',{bubbles:true}));
+                """, inp, full
+            )
+        except Exception:
+            # fallback send_keys if JS failed
+            try:
+                inp.clear()
+            except Exception:
+                pass
+            inp.send_keys(full)
+
+        # help enable "Пошук"
+        self.wait_search_ready(driver, timeout=3)
+
+    def click_search(self, driver, wait):
+        # turbo: try cached button click
+        try:
+            btn = self.get_search_btn_el(driver)
+            self.js_click(driver, btn)
+            return
+        except Exception:
+            self._cache_reset()
+
+        # fallback wait
+        btn = wait.until(EC.element_to_be_clickable((By.XPATH,
+            "//button[.//span[contains(@class,'mat-button-wrapper') and normalize-space(.)='Пошук']]"
+        )))
+        self._cached["search_btn"] = btn
+        self.js_click(driver, btn)
 
     def wait_services_only_fast(self, driver, wait_seconds: float) -> bool:
         self.handle_error_screen_once(driver)
@@ -890,11 +969,17 @@ class App:
     # =======================
     # CHECKPOINTS
     # =======================
-    def checkpoint_save_filemode(self):
+    def _flush_buffers(self):
         if self.valid_buf:
             append_lines(VALID_FILE, self.valid_buf)
             self.valid_buf.clear()
 
+        if self.regsoon_buf:
+            append_lines(REGSOON_FILE, self.regsoon_buf)
+            self.regsoon_buf.clear()
+
+    def checkpoint_save_filemode(self):
+        self._flush_buffers()
         rewrite_numbers_file(
             original_lines=self.file_lines,
             to_delete_numbers=self.to_delete_numbers,
@@ -903,10 +988,8 @@ class App:
         self._log(f"💾 Checkpoint: збережено прогрес (кожні {self.get_save_every_n()} номерів)")
 
     def checkpoint_save_generator(self):
-        if self.valid_buf:
-            append_lines(VALID_FILE, self.valid_buf)
-            self.valid_buf.clear()
-            self._log("💾 Checkpoint: збережено valid.txt (режим генератора)")
+        self._flush_buffers()
+        self._log("💾 Checkpoint: збережено valid.txt/regsoon.txt (режим генератора)")
 
     # =======================
     # RUN CONTROL
@@ -967,6 +1050,7 @@ class App:
         options.add_argument("--enable-zero-copy")
         options.add_argument("--disable-software-rasterizer")
 
+        # keep images ON (captcha)
         options.page_load_strategy = "eager"
         options.add_experimental_option("prefs", {"profile.default_content_setting_values.notifications": 2})
 
@@ -976,10 +1060,24 @@ class App:
             driver = webdriver.Chrome(options=options)
             driver.implicitly_wait(0)
 
+            # TURBO: block ONLY trackers/video (NOT images)
+            try:
+                driver.execute_cdp_cmd("Network.enable", {})
+                driver.execute_cdp_cmd("Network.setBlockedURLs", {
+                    "urls": [
+                        "*doubleclick*",
+                        "*googletagmanager*",
+                        "*google-analytics*",
+                        "*.mp4", "*.webm", "*.avi"
+                    ]
+                })
+            except Exception:
+                pass
+
             wait_login = WebDriverWait(driver, WAIT_LOGIN_SECONDS, poll_frequency=POLL)
 
             driver.get(URL)
-            self._log("Очікую логін/2FA/капчу…")
+            self._log("Очікую логін/2FA/капчу… (картинки увімкнено)")
 
             wait_login.until(EC.presence_of_element_located((By.XPATH,
                 "//div[contains(@class,'content')][.//div[contains(@class,'label') and normalize-space(.)='Клієнт']]"
@@ -1004,83 +1102,97 @@ class App:
             self.run_started_at = time.time()
 
             def process_one(number: str, line_info: str = ""):
-                if generator_mode and not self.use_generator.get():
-                    self._log("🛑 Галочка генератора знята — зупиняю.")
-                    self.stop_event.set()
-                    return False
+                # per-number safety: one fail doesn't kill run
+                try:
+                    if generator_mode and not self.use_generator.get():
+                        self._log("🛑 Галочка генератора знята — зупиняю.")
+                        self.stop_event.set()
+                        return False
 
-                if self.stop_event.is_set():
-                    return False
+                    if self.stop_event.is_set():
+                        return False
 
-                self._set_status(f"380{number}")
-                self._log(f"→ 380{number}" + (f" | рядок: {line_info}" if line_info else ""))
+                    self._set_status(f"380{number}")
+                    self._log(f"→ 380{number}" + (f" | рядок: {line_info}" if line_info else ""))
 
-                wait = self.back_to_home_and_open_client(driver)
-                self.set_number_safe(driver, wait, number)
+                    wait = self.back_to_home_and_open_client(driver)
+                    self.set_number_safe(driver, wait, number)
 
-                if not self.wait_search_ready(driver, timeout=WAIT_UI_SECONDS):
-                    self.skipped_count += 1
-                    self._log("  ⚠ Пошук не активувався → пропуск")
-                    self._update_eta()
-                    return True
-
-                self.click_search(driver, wait)
-                self.handle_error_screen_once(driver)
-
-                services = self.wait_services_only_fast(driver, wait_seconds)
-                has_start_pack = self.has_start_pack_fast(driver)
-
-                # ✅ REGSOON
-                if has_start_pack and not services:
-                    if self.write_regsoon.get():
-                        with open(REGSOON_FILE, "a", encoding="utf-8") as f:
-                            f.write(number + "\n")
-                        self.regsoon_count += 1
-                        self._log("  🕒 RegSoon: є старт.пакет, але нема «Реєстрація послуг» → записав у regsoon.txt")
-                    else:
-                        self._log("  🕒 RegSoon умова спрацювала, але запис вимкнено → пропуск")
+                    if not self.wait_search_ready(driver, timeout=WAIT_UI_SECONDS):
                         self.skipped_count += 1
-                    self._update_eta()
-                    return True
+                        self._log("  ⚠ Пошук не активувався → пропуск")
+                        self._update_eta()
+                        return True
 
-                if (not services) and (not has_start_pack):
+                    self.click_search(driver, wait)
+                    self.handle_error_screen_once(driver)
+
+                    services = self.wait_services_only_fast(driver, wait_seconds)
+                    has_start_pack = self.has_start_pack_fast(driver)
+
+                    # REGSOON
+                    if has_start_pack and not services:
+                        if self.write_regsoon.get():
+                            self.regsoon_buf.append(number)
+                            self.regsoon_count += 1
+                            self._log("  🕒 RegSoon: є старт.пакет, але нема «Реєстрація послуг» → у буфер")
+                        else:
+                            self._log("  🕒 RegSoon умова спрацювала, але запис вимкнено → пропуск")
+                            self.skipped_count += 1
+                        self._update_eta()
+                        return True
+
+                    if (not services) and (not has_start_pack):
+                        self.skipped_count += 1
+                        self._log("  ⏭ пропуск (нема «Реєстрація послуг» і нема старт.пакету)")
+                        self._update_eta()
+                        return True
+
+                    if services and has_start_pack:
+                        self.click_start_pack(driver)
+                        time.sleep(0.14)
+                        self.click_register(driver)
+
+                        already = self.wait_already_error_short_fast(driver, seconds=1.1)
+
+                        try:
+                            self.click_ok_anywhere(driver, timeout=4)
+                        except Exception:
+                            pass
+
+                        if already:
+                            self.already_count += 1
+                            self._log("  🟡 Номер вже було зареєстровано → видалити з numbers.txt")
+                            if not generator_mode:
+                                self.to_delete_numbers.add(number)
+                        else:
+                            self.valid_count += 1
+                            self._log("  ✔ Зареєстровано (VALID) → видалити з numbers.txt")
+                            self.valid_buf.append(number)
+                            if not generator_mode:
+                                self.to_delete_numbers.add(number)
+
+                        self._update_eta()
+                        return True
+
                     self.skipped_count += 1
-                    self._log("  ⏭ пропуск (нема «Реєстрація послуг» і нема старт.пакету)")
+                    self._log("  ⏭ незрозумілий стан → пропуск")
                     self._update_eta()
                     return True
 
-                if services and has_start_pack:
-                    self.click_start_pack(driver)
-                    time.sleep(0.18)
-                    self.click_register(driver)
-
-                    already = self.wait_already_error_short_fast(driver, seconds=1.1)
-
-                    try:
-                        self.click_ok_anywhere(driver, timeout=4)
-                    except Exception:
-                        pass
-
-                    if already:
-                        # мы больше не показываем это на бейдже, но логика пусть остаётся
-                        self.already_count += 1
-                        self._log("  🟡 Номер вже було зареєстровано → видалити з numbers.txt")
-                        if not generator_mode:
-                            self.to_delete_numbers.add(number)
-                    else:
-                        self.valid_count += 1
-                        self._log("  ✔ Зареєстровано (VALID) → видалити з numbers.txt")
-                        self.valid_buf.append(number)
-                        if not generator_mode:
-                            self.to_delete_numbers.add(number)
-
+                except (TimeoutException, StaleElementReferenceException) as e:
+                    self.skipped_count += 1
+                    self._log(f"  ⚠ Selenium timeout/stale → SKIP ({type(e).__name__})")
+                    self._cache_reset()
                     self._update_eta()
                     return True
-
-                self.skipped_count += 1
-                self._log("  ⏭ незрозумілий стан → пропуск")
-                self._update_eta()
-                return True
+                except WebDriverException as e:
+                    self.skipped_count += 1
+                    msg = e.msg if hasattr(e, "msg") else str(e)
+                    self._log(f"  ⚠ WebDriverException → SKIP: {msg[:220]}")
+                    self._cache_reset()
+                    self._update_eta()
+                    return True
 
             if generator_mode:
                 i = 0
@@ -1124,6 +1236,11 @@ class App:
         except Exception as e:
             self._log(f"❌ Критична помилка: {type(e).__name__}: {e}")
         finally:
+            try:
+                self._flush_buffers()
+            except Exception:
+                pass
+
             try:
                 if driver:
                     driver.quit()
