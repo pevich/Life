@@ -35,6 +35,41 @@ ACCURACY_WAIT_SECONDS = 1.8
 
 DEFAULT_PREFIXES = ["67", "68", "77", "96", "97", "98", "39", "50", "66", "95", "99", "75", "63", "73", "93"]
 
+# Chrome profiles root (parallel safe)
+PROFILES_ROOT = "chrome_profiles"
+LAUNCHERS_DIR = "launchers"
+
+
+# =======================
+# CLI ARGS
+# =======================
+def parse_cli_args(argv):
+    """
+    Supports:
+      --profile-id N
+      --no-profile
+    """
+    out = {"profile_id": None, "use_profile": None}
+    i = 0
+    while i < len(argv):
+        a = argv[i].strip()
+        if a == "--profile-id" and i + 1 < len(argv):
+            try:
+                out["profile_id"] = int(argv[i + 1])
+            except Exception:
+                pass
+            i += 2
+            continue
+        if a == "--no-profile":
+            out["use_profile"] = False
+            i += 1
+            continue
+        i += 1
+    return out
+
+
+CLI = parse_cli_args(sys.argv[1:])
+
 
 # =======================
 # HELPERS
@@ -154,10 +189,6 @@ def open_file_in_default_app(filepath: str):
 
 
 def parse_prefixes(raw: str):
-    """
-    Accepts: "67,68 77;96" etc.
-    Returns list of unique 2-digit prefixes (strings), preserving order.
-    """
     raw = (raw or "").strip()
     if not raw:
         return []
@@ -173,6 +204,26 @@ def parse_prefixes(raw: str):
     return out
 
 
+def is_frozen_exe() -> bool:
+    # PyInstaller/py2exe etc.
+    return bool(getattr(sys, "frozen", False))
+
+
+def current_script_path() -> str:
+    try:
+        return os.path.abspath(__file__)
+    except Exception:
+        return ""
+
+
+def quote_win(s: str) -> str:
+    if not s:
+        return '""'
+    if '"' in s:
+        s = s.replace('"', '\\"')
+    return f'"{s}"'
+
+
 # =======================
 # APP
 # =======================
@@ -180,29 +231,38 @@ class App:
     def __init__(self, root: tk.Tk):
         self.root = root
         self.root.title("Firk — Lifecell Helper")
-        self.root.geometry("1180x860")
-        self.root.minsize(1080, 760)
+        self.root.geometry("1180x920")
+        self.root.minsize(1080, 780)
 
         self._apply_win11_theme()
 
         # ---- State vars
         self.status_text = tk.StringVar(value="Готово")
 
-        # default = reliable
         self.mode = tk.StringVar(value="accuracy")  # speed / accuracy / custom
         self.custom_seconds = tk.DoubleVar(value=ACCURACY_WAIT_SECONDS)
 
         self.pause_seconds = tk.DoubleVar(value=0.3)
         self.save_every_n = tk.IntVar(value=20)
 
-        # NEW: UI/log throttling (you can change in settings)
-        self.ui_every_n = tk.IntVar(value=10)   # update UI once per N numbers (1 = each)
-        self.log_every_n = tk.IntVar(value=10)  # write routine log once per N numbers (1 = each)
+        # UI/log throttling (user-controlled)
+        self.ui_every_n = tk.IntVar(value=10)
+        self.log_every_n = tk.IntVar(value=10)
 
         self.order = tk.StringVar(value="start")
         self.keep_non_numbers = tk.BooleanVar(value=True)
         self.write_regsoon = tk.BooleanVar(value=True)
         self.use_generator = tk.BooleanVar(value=False)
+
+        # Chrome profile control
+        self.use_chrome_profile = tk.BooleanVar(value=True)
+        self.profile_id = tk.IntVar(value=1)
+
+        # Apply CLI overrides if provided
+        if CLI.get("use_profile") is False:
+            self.use_chrome_profile.set(False)
+        if CLI.get("profile_id"):
+            self.profile_id.set(max(1, int(CLI["profile_id"])))
 
         # prefixes input
         self.prefixes_text = tk.StringVar(value=", ".join(DEFAULT_PREFIXES))
@@ -215,25 +275,21 @@ class App:
         self.valid_count = 0
         self.skipped_count = 0
         self.regsoon_count = 0
-        self.already_count = 0  # internal counter stays
+        self.already_count = 0
 
         self.run_started_at = None
         self.done_count = 0
-        self.total_count = 0  # 0 => infinite for UI
+        self.total_count = 0
 
-        # generator recent cache to avoid repeats
         self.gen_recent = set()
 
-        # file mode buffers
         self.file_lines = []
         self.to_delete_numbers = set()
         self.valid_buf = []
         self.regsoon_buf = []
 
-        # turbo cache for selenium elements
         self._cached = {"msisdn": None, "search_btn": None}
 
-        # ---- UI
         self._build_ui()
 
     # =======================
@@ -247,7 +303,6 @@ class App:
             self.style.theme_use("clam")
 
         self.root.option_add("*Font", ("Segoe UI", 10))
-
         self.style.configure("H1.TLabel", font=("Segoe UI", 18, "bold"))
         self.style.configure("H2.TLabel", font=("Segoe UI", 12, "bold"))
         self.style.configure("Muted.TLabel", font=("Segoe UI", 10))
@@ -310,22 +365,15 @@ class App:
         self.badge_regsoon_var = tk.StringVar(value="REGSOON: 0")
         self.badge_skip_var = tk.StringVar(value="SKIP: 0")
 
-        self.badge_valid = tk.Label(
-            badges_frame, textvariable=self.badge_valid_var,
-            bg=self._c_valid_bg, fg=self._c_badge_fg,
-            font=("Segoe UI", 10, "bold"), padx=12, pady=6, cursor="hand2"
-        )
-        self.badge_regsoon = tk.Label(
-            badges_frame, textvariable=self.badge_regsoon_var,
-            bg=self._c_regsoon_bg, fg=self._c_badge_fg,
-            font=("Segoe UI", 10, "bold"), padx=12, pady=6, cursor="hand2"
-        )
-        self.badge_skip = tk.Label(
-            badges_frame, textvariable=self.badge_skip_var,
-            bg=self._c_skip_bg, fg=self._c_badge_fg,
-            font=("Segoe UI", 10, "bold"), padx=12, pady=6, cursor="hand2"
-        )
-
+        self.badge_valid = tk.Label(badges_frame, textvariable=self.badge_valid_var,
+                                    bg=self._c_valid_bg, fg=self._c_badge_fg,
+                                    font=("Segoe UI", 10, "bold"), padx=12, pady=6, cursor="hand2")
+        self.badge_regsoon = tk.Label(badges_frame, textvariable=self.badge_regsoon_var,
+                                      bg=self._c_regsoon_bg, fg=self._c_badge_fg,
+                                      font=("Segoe UI", 10, "bold"), padx=12, pady=6, cursor="hand2")
+        self.badge_skip = tk.Label(badges_frame, textvariable=self.badge_skip_var,
+                                   bg=self._c_skip_bg, fg=self._c_badge_fg,
+                                   font=("Segoe UI", 10, "bold"), padx=12, pady=6, cursor="hand2")
         self.badge_valid.pack(side="left")
         self.badge_regsoon.pack(side="left", padx=10)
         self.badge_skip.pack(side="left")
@@ -352,10 +400,8 @@ class App:
 
         top = ttk.Frame(prog)
         top.pack(fill="x")
-
         self.progress_caption = tk.StringVar(value="0 / 0")
         ttk.Label(top, textvariable=self.progress_caption, style="H2.TLabel").pack(side="left")
-
         self.eta_caption = tk.StringVar(value="ETA: - | Пройшло: - | Режим: -")
         ttk.Label(top, textvariable=self.eta_caption, style="Muted.TLabel").pack(side="right")
 
@@ -367,10 +413,8 @@ class App:
 
         btnrow = ttk.Frame(actions)
         btnrow.pack(fill="x")
-
         self.btn_start = ttk.Button(btnrow, text="▶ Почати", style="Primary.TButton", command=self.start)
         self.btn_stop = ttk.Button(btnrow, text="⏹ Стоп", style="Danger.TButton", command=self.stop)
-
         self.btn_start.pack(side="left")
         self.btn_stop.pack(side="left", padx=10)
 
@@ -380,11 +424,9 @@ class App:
         ttk.Button(btnrow, text="🧾 numbers.txt", command=self.open_numbers_file).pack(side="left", padx=6)
         ttk.Button(btnrow, text="Очистити логи", command=self.clear_logs).pack(side="right")
 
-        hint = (
-            "Turbo+Stable: швидші JS-перевірки + кеш елементів. "
-            "Капча працює (картинки НЕ блокуємо). "
-            "Також додано вирівнювання швидкості фонового Chrome."
-        )
+        hint = ("✅ Профілі: 10 запусків → 10 різних profile_id (1..10). "
+                "Капча працює. Фонові вікна вирівняні по швидкості. "
+                "Є кнопка генерації .bat для профілів.")
         ttk.Label(actions, text=hint, style="Muted.TLabel", wraplength=980).pack(anchor="w", pady=(10, 0))
 
     def _build_settings_tab(self):
@@ -397,59 +439,69 @@ class App:
         right = ttk.Frame(grid)
         right.pack(side="left", fill="both", expand=True)
 
+        # Chrome profiles
+        prof = ttk.LabelFrame(left, text="Chrome профіль", style="Card.TLabelframe")
+        prof.pack(fill="x", pady=(0, 10))
+
+        ttk.Checkbutton(prof,
+                        text="Використовувати окремий профіль Chrome (рекомендовано для 10 запусків)",
+                        variable=self.use_chrome_profile).pack(anchor="w")
+
+        rprof = ttk.Frame(prof)
+        rprof.pack(fill="x", pady=(8, 0))
+        ttk.Label(rprof, text="Номер профілю (для цієї програми):", style="Muted.TLabel").pack(side="left")
+        ttk.Spinbox(rprof, from_=1, to=100, width=8, textvariable=self.profile_id).pack(side="left", padx=8)
+        ttk.Button(rprof, text="📁 Профілі", command=self.open_profiles_folder).pack(side="left", padx=8)
+
+        rprof2 = ttk.Frame(prof)
+        rprof2.pack(fill="x", pady=(8, 0))
+        ttk.Button(rprof2, text="🧩 Згенерувати 10 .bat (профілі 1..10)", command=self.generate_10_bats).pack(side="left")
+        ttk.Button(rprof2, text="▶ Старт усі 10 (start_all_10.bat)", command=self.open_launchers_folder).pack(side="left", padx=10)
+
+        ttk.Label(prof,
+                  text=f"Папка профілів: ./{PROFILES_ROOT}/profile_XX (створюється автоматично)",
+                  style="Muted.TLabel").pack(anchor="w", pady=(8, 0))
+
+        # Source
         src = ttk.LabelFrame(left, text="Джерело номерів", style="Card.TLabelframe")
         src.pack(fill="x", pady=(0, 10))
-        ttk.Checkbutton(
-            src,
-            text="Генерувати номери автоматично (нескінченно, поки галочка увімкнена)",
-            variable=self.use_generator
-        ).pack(anchor="w")
+        ttk.Checkbutton(src, text="Генерувати номери автоматично (нескінченно, поки галочка увімкнена)",
+                        variable=self.use_generator).pack(anchor="w")
 
         prefbox = ttk.LabelFrame(left, text="Префікси генератора", style="Card.TLabelframe")
         prefbox.pack(fill="x", pady=(0, 10))
         ttk.Label(prefbox, text="Впиши префікси (2 цифри) через кому/пробіл:", style="Muted.TLabel").pack(anchor="w")
-
         rowp = ttk.Frame(prefbox)
         rowp.pack(fill="x", pady=(6, 0))
         self.prefix_entry = ttk.Entry(rowp, textvariable=self.prefixes_text)
         self.prefix_entry.pack(side="left", fill="x", expand=True)
         ttk.Button(rowp, text="Застосувати", command=self.apply_prefixes).pack(side="left", padx=10)
-
         self.prefix_hint = ttk.Label(prefbox, text=f"Поточні: {', '.join(self.prefixes_list)}", style="Muted.TLabel", wraplength=520)
         self.prefix_hint.pack(anchor="w", pady=(6, 0))
         self.prefix_entry.bind("<FocusOut>", lambda e: self.apply_prefixes(silent=True))
 
         filebox = ttk.LabelFrame(left, text="numbers.txt", style="Card.TLabelframe")
         filebox.pack(fill="x", pady=(0, 10))
-
         row = ttk.Frame(filebox)
         row.pack(fill="x")
         ttk.Label(row, text="Порядок:", style="Muted.TLabel").pack(side="left")
         ttk.Radiobutton(row, text="З початку", variable=self.order, value="start").pack(side="left", padx=10)
         ttk.Radiobutton(row, text="З кінця", variable=self.order, value="end").pack(side="left", padx=10)
-
-        ttk.Checkbutton(
-            filebox,
-            text="Зберігати рядки без номерів (текст/дати) у numbers.txt",
-            variable=self.keep_non_numbers
-        ).pack(anchor="w", pady=(8, 0))
+        ttk.Checkbutton(filebox, text="Зберігати рядки без номерів (текст/дати) у numbers.txt",
+                        variable=self.keep_non_numbers).pack(anchor="w", pady=(8, 0))
 
         waitbox = ttk.LabelFrame(right, text="Очікування «Реєстрація послуг»", style="Card.TLabelframe")
         waitbox.pack(fill="x", pady=(0, 10))
-
         row1 = ttk.Frame(waitbox)
         row1.pack(fill="x")
-
         ttk.Radiobutton(row1, text=f"Швидко ({SPEED_WAIT_SECONDS}s)", variable=self.mode, value="speed").pack(side="left")
         ttk.Radiobutton(row1, text=f"Надійно ({ACCURACY_WAIT_SECONDS}s)", variable=self.mode, value="accuracy").pack(side="left", padx=10)
         ttk.Radiobutton(row1, text="Кастом", variable=self.mode, value="custom").pack(side="left", padx=(0, 8))
-
         ttk.Entry(row1, width=6, textvariable=self.custom_seconds).pack(side="left")
         ttk.Label(row1, text="сек", style="Muted.TLabel").pack(side="left", padx=6)
 
         pace = ttk.LabelFrame(right, text="Швидкість", style="Card.TLabelframe")
         pace.pack(fill="x", pady=(0, 10))
-
         r2 = ttk.Frame(pace)
         r2.pack(fill="x")
         ttk.Label(r2, text="Пауза між номерами (сек):", style="Muted.TLabel").pack(side="left")
@@ -458,10 +510,8 @@ class App:
         r3 = ttk.Frame(pace)
         r3.pack(fill="x", pady=(8, 0))
         ttk.Label(r3, text="Зберігати прогрес кожні N номерів:", style="Muted.TLabel").pack(side="left")
-        ttk.Spinbox(r3, from_=1, to=500, width=8, textvariable=self.save_every_n).pack(side="left", padx=8)
-        ttk.Label(r3, text="(valid.txt + numbers.txt)", style="Muted.TLabel").pack(side="left")
+        ttk.Spinbox(r3, from_=1, to=5000, width=8, textvariable=self.save_every_n).pack(side="left", padx=8)
 
-        # NEW: user-controlled UI/log throttling
         r4 = ttk.Frame(pace)
         r4.pack(fill="x", pady=(8, 0))
         ttk.Label(r4, text="Оновлювати UI кожні N номерів:", style="Muted.TLabel").pack(side="left")
@@ -474,31 +524,23 @@ class App:
 
         reg = ttk.LabelFrame(right, text="RegSoon", style="Card.TLabelframe")
         reg.pack(fill="x")
-
-        ttk.Checkbutton(
-            reg,
-            text="Записувати в regsoon.txt, якщо є «Реєстрація стартового пакету», але немає «Реєстрація послуг»",
-            variable=self.write_regsoon
-        ).pack(anchor="w")
+        ttk.Checkbutton(reg,
+                        text="Записувати в regsoon.txt, якщо є «Реєстрація стартового пакету», але немає «Реєстрація послуг»",
+                        variable=self.write_regsoon).pack(anchor="w")
 
     def _build_logs_tab(self):
         top = ttk.Frame(self.tab_logs)
         top.pack(fill="x")
-
         ttk.Label(top, text="Журнал", style="H2.TLabel").pack(side="left")
-
         ttk.Button(top, text="Скопіювати все", command=self.copy_logs).pack(side="right")
         ttk.Button(top, text="Очистити", command=self.clear_logs).pack(side="right", padx=8)
 
         body = ttk.Frame(self.tab_logs)
         body.pack(fill="both", expand=True, pady=(10, 0))
-
         self.log_box = tk.Text(body, height=18, wrap="word", undo=False)
         self.log_box.pack(side="left", fill="both", expand=True)
-
         sb = ttk.Scrollbar(body, orient="vertical", command=self.log_box.yview)
         sb.pack(side="right", fill="y")
-
         self.log_box.configure(yscrollcommand=sb.set)
         self.log_box.configure(font=("Consolas", 10))
         self.log_box.configure(state="disabled")
@@ -514,11 +556,78 @@ class App:
         return lf
 
     # =======================
+    # Launchers (.bat)
+    # =======================
+    def generate_10_bats(self):
+        """
+        Creates:
+          launchers/run_profile_01.bat .. run_profile_10.bat
+          launchers/start_all_10.bat
+        Works for both .py and frozen .exe
+        """
+        base_dir = os.path.abspath(os.getcwd())
+        out_dir = os.path.join(base_dir, LAUNCHERS_DIR)
+        os.makedirs(out_dir, exist_ok=True)
+
+        exe_or_py = os.path.abspath(sys.executable)  # python.exe or app.exe
+        script = current_script_path()
+
+        frozen = is_frozen_exe()
+
+        # command template
+        def cmd_for(pid: int) -> str:
+            if frozen:
+                # exe --profile-id N
+                return f'{quote_win(exe_or_py)} --profile-id {pid}'
+            else:
+                # python script.py --profile-id N
+                return f'{quote_win(exe_or_py)} {quote_win(script)} --profile-id {pid}'
+
+        # individual bats
+        for pid in range(1, 11):
+            bat_path = os.path.join(out_dir, f"run_profile_{pid:02d}.bat")
+            lines = [
+                "@echo off",
+                "cd /d \"%~dp0..\"",
+                f"start \"Firk profile {pid:02d}\" {cmd_for(pid)}",
+            ]
+            with open(bat_path, "w", encoding="utf-8", newline="\r\n") as f:
+                f.write("\r\n".join(lines) + "\r\n")
+
+        # start all
+        all_path = os.path.join(out_dir, "start_all_10.bat")
+        all_lines = ["@echo off", "cd /d \"%~dp0..\""]
+        for pid in range(1, 11):
+            all_lines.append(f"start \"Firk profile {pid:02d}\" {cmd_for(pid)}")
+            all_lines.append("timeout /t 1 /nobreak >nul")
+        with open(all_path, "w", encoding="utf-8", newline="\r\n") as f:
+            f.write("\r\n".join(all_lines) + "\r\n")
+
+        self._log(f"🧩 Згенеровано .bat у: {os.path.abspath(out_dir)}")
+        try:
+            messagebox.showinfo("Готово", f"Згенеровано .bat у папці:\n{os.path.abspath(out_dir)}\n\nЄ також start_all_10.bat")
+        except Exception:
+            pass
+
+        open_folder(out_dir)
+
+    def open_launchers_folder(self):
+        out_dir = os.path.abspath(LAUNCHERS_DIR)
+        os.makedirs(out_dir, exist_ok=True)
+        open_folder(out_dir)
+
+    # =======================
     # File open actions
     # =======================
     def open_files_folder(self):
         folder = os.path.abspath(os.getcwd())
         self._log(f"📁 Відкриваю папку: {folder}")
+        open_folder(folder)
+
+    def open_profiles_folder(self):
+        folder = os.path.abspath(PROFILES_ROOT)
+        os.makedirs(folder, exist_ok=True)
+        self._log(f"📁 Відкриваю папку профілів: {folder}")
         open_folder(folder)
 
     def open_valid_file(self):
@@ -545,7 +654,6 @@ class App:
             self.prefixes_text.set(", ".join(self.prefixes_list))
         else:
             self.prefixes_list = parsed
-
         try:
             self.prefix_hint.configure(text=f"Поточні: {', '.join(self.prefixes_list)}")
         except Exception:
@@ -635,7 +743,6 @@ class App:
         elapsed = time.time() - self.run_started_at
         done = max(0, self.done_count)
         avg = None if done <= 0 else (elapsed / done)
-
         avg_txt = "-" if avg is None else fmt_duration(avg)
 
         if self.total_count and self.total_count > 0 and avg is not None:
@@ -650,9 +757,7 @@ class App:
         mode_name = "Швидко" if mode == "speed" else ("Надійно" if mode == "accuracy" else "Кастом")
 
         def _u():
-            self.eta_caption.set(
-                f"ETA: {eta_txt} | Пройшло: {fmt_duration(elapsed)} | Режим: {mode_name} ({wait_s:.1f}с)"
-            )
+            self.eta_caption.set(f"ETA: {eta_txt} | Пройшло: {fmt_duration(elapsed)} | Режим: {mode_name} ({wait_s:.1f}с)")
         self.root.after(0, _u)
         self._update_cards(avg_txt)
 
@@ -732,10 +837,7 @@ class App:
 
     def wait_client_button(self, driver):
         return WebDriverWait(driver, WAIT_UI_SECONDS, poll_frequency=POLL).until(
-            EC.element_to_be_clickable((
-                By.XPATH,
-                "//div[contains(@class,'content')][.//div[contains(@class,'label') and normalize-space(.)='Клієнт']]"
-            ))
+            EC.element_to_be_clickable((By.XPATH, "//div[contains(@class,'content')][.//div[contains(@class,'label') and normalize-space(.)='Клієнт']]"))
         )
 
     def click_client(self, driver):
@@ -748,7 +850,6 @@ class App:
         return wait
 
     def back_to_home_and_open_client(self, driver):
-        # If input exists, we're already in client search view
         if driver.find_elements(By.ID, "msisdn"):
             return self.wait_msisdn_ready(driver)
 
@@ -765,18 +866,14 @@ class App:
         time.sleep(0.10)
         return self.wait_msisdn_ready(driver)
 
-    # ---------- FAST JS checks ----------
     def js_has_label_text(self, driver, text_value: str) -> bool:
         return bool(driver.execute_script(
             """
             const t = arguments[0];
             const nodes = document.querySelectorAll('div.label');
-            for (const n of nodes) {
-              if ((n.textContent || '').trim() === t) return true;
-            }
+            for (const n of nodes) { if ((n.textContent || '').trim() === t) return true; }
             return false;
-            """,
-            text_value
+            """, text_value
         ))
 
     def js_has_error_text_contains(self, driver, contains_value: str) -> bool:
@@ -789,25 +886,19 @@ class App:
               if (s.includes(t)) return true;
             }
             return false;
-            """,
-            contains_value
+            """, contains_value
         ))
 
     def has_error_screen(self, driver):
         return bool(driver.execute_script(
-            """
-            const h = document.querySelector('h1');
-            return h && (h.textContent || '').trim() === 'Помилка';
-            """
+            "const h=document.querySelector('h1'); return h && (h.textContent||'').trim()==='Помилка';"
         ))
 
     def click_ok_anywhere(self, driver, timeout=2):
         btn = WebDriverWait(driver, timeout, poll_frequency=POLL).until(
-            EC.element_to_be_clickable((
-                By.XPATH,
+            EC.element_to_be_clickable((By.XPATH,
                 "//button[.//span[normalize-space(.)='Ок' or normalize-space(.)='ОК' or normalize-space(.)='OK' or normalize-space(.)='Добре']]"
-                " | "
-                "//button[normalize-space(.)='Ок' or normalize-space(.)='ОК' or normalize-space(.)='OK' or normalize-space(.)='Добре']"
+                " | //button[normalize-space(.)='Ок' or normalize-space(.)='ОК' or normalize-space(.)='OK' or normalize-space(.)='Добре']"
             ))
         )
         self.js_click(driver, btn)
@@ -820,19 +911,16 @@ class App:
                 time.sleep(0.10)
             except Exception:
                 pass
-            # DOM often changes after error OK
             self._cache_reset()
             return True
         return False
 
-    # TURBO: wait search ready via JS (faster than find_elements loops)
     def wait_search_ready(self, driver, timeout=WAIT_UI_SECONDS) -> bool:
         end = time.time() + timeout
         while time.time() < end:
             if self.stop_event.is_set():
                 return False
             self.handle_error_screen_once(driver)
-            ready = False
             try:
                 ready = bool(driver.execute_script(
                     """
@@ -842,14 +930,13 @@ class App:
                     const cls = btn.getAttribute('class') || '';
                     if (cls.includes('mat-button-disabled')) return false;
                     const r = btn.getBoundingClientRect();
-                    const visible = r.width > 0 && r.height > 0;
-                    return visible && !btn.disabled;
+                    return r.width>0 && r.height>0 && !btn.disabled;
                     """
                 ))
+                if ready:
+                    return True
             except Exception:
-                ready = False
-            if ready:
-                return True
+                pass
             time.sleep(POLL)
         return False
 
@@ -863,7 +950,6 @@ class App:
 
         full = "380" + number
 
-        # quick clear
         try:
             inp.click()
             inp.send_keys(Keys.CONTROL, "a")
@@ -872,7 +958,6 @@ class App:
         except Exception:
             pass
 
-        # fast JS set (Angular-friendly)
         try:
             driver.execute_script(
                 """
@@ -905,10 +990,7 @@ class App:
         except Exception:
             self._cache_reset()
 
-        btn = wait.until(EC.element_to_be_clickable((
-            By.XPATH,
-            "//button[.//span[contains(@class,'mat-button-wrapper') and normalize-space(.)='Пошук']]"
-        )))
+        btn = wait.until(EC.element_to_be_clickable((By.XPATH, "//button[.//span[contains(@class,'mat-button-wrapper') and normalize-space(.)='Пошук']]")))
         self._cached["search_btn"] = btn
         self.js_click(driver, btn)
 
@@ -916,7 +998,6 @@ class App:
         self.handle_error_screen_once(driver)
         if self.js_has_label_text(driver, "Реєстрація послуг"):
             return True
-
         end = time.time() + wait_seconds
         while time.time() < end:
             if self.stop_event.is_set():
@@ -933,19 +1014,13 @@ class App:
 
     def click_start_pack(self, driver, timeout=6):
         el = WebDriverWait(driver, timeout, poll_frequency=POLL).until(
-            EC.element_to_be_clickable((
-                By.XPATH,
-                "//div[contains(@class,'content')][.//div[contains(@class,'label') and normalize-space(.)='Реєстрація стартового пакету']]"
-            ))
+            EC.element_to_be_clickable((By.XPATH, "//div[contains(@class,'content')][.//div[contains(@class,'label') and normalize-space(.)='Реєстрація стартового пакету']]"))
         )
         self.js_click(driver, el)
 
     def click_register(self, driver, timeout=6):
         btn = WebDriverWait(driver, timeout, poll_frequency=POLL).until(
-            EC.element_to_be_clickable((
-                By.XPATH,
-                "//button[.//span[contains(@class,'mat-button-wrapper') and normalize-space(.)='Зареєструвати']]"
-            ))
+            EC.element_to_be_clickable((By.XPATH, "//button[.//span[contains(@class,'mat-button-wrapper') and normalize-space(.)='Зареєструвати']]"))
         )
         self.js_click(driver, btn)
 
@@ -960,7 +1035,6 @@ class App:
             time.sleep(POLL)
         return False
 
-    # ---------- generator ----------
     def gen_next_number(self) -> str:
         if len(self.gen_recent) > 200_000:
             self.gen_recent.clear()
@@ -986,11 +1060,7 @@ class App:
 
     def checkpoint_save_filemode(self):
         self._flush_buffers()
-        rewrite_numbers_file(
-            original_lines=self.file_lines,
-            to_delete_numbers=self.to_delete_numbers,
-            keep_non_numbers=self.keep_non_numbers.get()
-        )
+        rewrite_numbers_file(self.file_lines, self.to_delete_numbers, self.keep_non_numbers.get())
         self._log(f"💾 Checkpoint: збережено прогрес (кожні {self.get_save_every_n()} номерів)")
 
     def checkpoint_save_generator(self):
@@ -1047,6 +1117,8 @@ class App:
         options.add_argument("--disable-sync")
         options.add_argument("--metrics-recording-only")
         options.add_argument("--disable-features=Translate,BackForwardCache")
+        options.add_argument("--no-first-run")
+        options.add_argument("--no-default-browser-check")
 
         options.add_argument("--use-gl=angle")
         options.add_argument("--use-angle=default")
@@ -1054,12 +1126,19 @@ class App:
         options.add_argument("--enable-zero-copy")
         options.add_argument("--disable-software-rasterizer")
 
-        # NEW: keep background windows fast (reduce 3s vs 6s)
+        # keep background windows fast (reduce 3s vs 6s)
         options.add_argument("--disable-background-timer-throttling")
         options.add_argument("--disable-backgrounding-occluded-windows")
         options.add_argument("--disable-renderer-backgrounding")
 
-        # keep images ON (captcha)
+        # use dedicated Chrome profile folder per program (parallel safe)
+        if self.use_chrome_profile.get():
+            pid = max(1, int(self.profile_id.get()))
+            prof_dir = os.path.abspath(os.path.join(PROFILES_ROOT, f"profile_{pid:02d}"))
+            os.makedirs(prof_dir, exist_ok=True)
+            options.add_argument(f"--user-data-dir={prof_dir}")
+            options.add_argument("--profile-directory=Default")
+
         options.page_load_strategy = "eager"
         options.add_experimental_option("prefs", {"profile.default_content_setting_values.notifications": 2})
 
@@ -1072,10 +1151,7 @@ class App:
             try:
                 driver.execute_cdp_cmd("Network.enable", {})
                 driver.execute_cdp_cmd("Network.setBlockedURLs", {
-                    "urls": [
-                        "*doubleclick*", "*googletagmanager*", "*google-analytics*",
-                        "*.mp4", "*.webm", "*.avi"
-                    ]
+                    "urls": ["*doubleclick*", "*googletagmanager*", "*google-analytics*", "*.mp4", "*.webm", "*.avi"]
                 })
             except Exception:
                 pass
@@ -1145,7 +1221,6 @@ class App:
                     services = self.wait_services_only_fast(driver, wait_seconds)
                     has_start_pack = self.has_start_pack_fast(driver)
 
-                    # REGSOON
                     if has_start_pack and not services:
                         if self.write_regsoon.get():
                             self.regsoon_buf.append(number)
@@ -1220,36 +1295,27 @@ class App:
                     ok = process_one(number)
                     if not ok:
                         break
-
                     self.done_count += 1
                     self._update_progress(self.done_count, self.total_count)
                     time.sleep(pause)
-
                     if i % save_every == 0:
                         self.checkpoint_save_generator()
-
                 self.checkpoint_save_generator()
-
             else:
                 items_iter = list(reversed(items)) if self.order.get() == "end" else list(items)
                 for idx, it in enumerate(items_iter, 1):
                     if self.stop_event.is_set():
                         break
-
                     number = it["number"]
                     line_info = it.get("line", "")
-
                     ok = process_one(number, line_info=line_info)
                     if not ok:
                         break
-
                     self.done_count += 1
                     self._update_progress(self.done_count, self.total_count)
                     time.sleep(pause)
-
                     if idx % save_every == 0:
                         self.checkpoint_save_filemode()
-
                 self.checkpoint_save_filemode()
 
         except Exception as e:
@@ -1260,13 +1326,11 @@ class App:
                 self._flush_buffers()
             except Exception:
                 pass
-
             try:
                 if driver:
                     driver.quit()
             except Exception:
                 pass
-
             self._set_status("Готово")
             self._set_running_ui(False)
             self._finish_progressbar()
