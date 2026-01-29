@@ -15,7 +15,6 @@ from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.common.exceptions import TimeoutException, StaleElementReferenceException, WebDriverException
 
-
 # =======================
 # CONFIG
 # =======================
@@ -33,7 +32,8 @@ POLL = 0.05
 SPEED_WAIT_SECONDS = 1.7
 ACCURACY_WAIT_SECONDS = 1.8
 
-DEFAULT_PREFIXES = ["67", "68", "77", "96", "97", "98", "39", "50", "66", "95", "99", "75", "63", "73", "93"]
+# ✅ prefixes from your screenshot
+DEFAULT_PREFIXES = ["67", "96", "98", "63", "93"]
 
 # Chrome profiles root (parallel safe)
 PROFILES_ROOT = "chrome_profiles"
@@ -106,7 +106,6 @@ def load_lines_with_numbers(path: str):
         return [], []
     with open(path, "r", encoding="utf-8") as f:
         lines = [ln.rstrip("\n") for ln in f]
-
     items = []
     seen = set()
     for idx, line in enumerate(lines):
@@ -205,7 +204,6 @@ def parse_prefixes(raw: str):
 
 
 def is_frozen_exe() -> bool:
-    # PyInstaller/py2exe etc.
     return bool(getattr(sys, "frozen", False))
 
 
@@ -239,57 +237,61 @@ class App:
         # ---- State vars
         self.status_text = tk.StringVar(value="Готово")
 
-        self.mode = tk.StringVar(value="accuracy")  # speed / accuracy / custom
-        self.custom_seconds = tk.DoubleVar(value=ACCURACY_WAIT_SECONDS)
+        # ✅ default = CUSTOM 2.0s
+        self.mode = tk.StringVar(value="custom")
+        self.custom_seconds = tk.DoubleVar(value=2.0)
 
+        # other UI defaults (per your request)
         self.pause_seconds = tk.DoubleVar(value=0.3)
-        self.save_every_n = tk.IntVar(value=20)
-
-        # UI/log throttling (user-controlled)
-        self.ui_every_n = tk.IntVar(value=10)
-        self.log_every_n = tk.IntVar(value=10)
+        self.save_every_n = tk.IntVar(value=500)   # ✅
+        self.ui_every_n = tk.IntVar(value=20)      # ✅
+        self.log_every_n = tk.IntVar(value=50)     # ✅
 
         self.order = tk.StringVar(value="start")
         self.keep_non_numbers = tk.BooleanVar(value=True)
         self.write_regsoon = tk.BooleanVar(value=True)
-        self.use_generator = tk.BooleanVar(value=False)
 
-        # Chrome profile control
+        # ✅ generator ON by default (infinite)
+        self.use_generator = tk.BooleanVar(value=True)
+
+        # ✅ chrome profile ON by default
         self.use_chrome_profile = tk.BooleanVar(value=True)
         self.profile_id = tk.IntVar(value=1)
 
-        # Apply CLI overrides if provided
+        # CLI overrides
         if CLI.get("use_profile") is False:
             self.use_chrome_profile.set(False)
         if CLI.get("profile_id"):
             self.profile_id.set(max(1, int(CLI["profile_id"])))
 
-        # prefixes input
+        # ✅ prefixes from screenshot
         self.prefixes_text = tk.StringVar(value=", ".join(DEFAULT_PREFIXES))
         self.prefixes_list = list(DEFAULT_PREFIXES)
 
         # runtime
         self.stop_event = threading.Event()
         self.worker = None
-
         self.valid_count = 0
         self.skipped_count = 0
         self.regsoon_count = 0
         self.already_count = 0
-
         self.run_started_at = None
         self.done_count = 0
         self.total_count = 0
 
+        # generator cache
         self.gen_recent = set()
 
+        # file mode buffers
         self.file_lines = []
         self.to_delete_numbers = set()
         self.valid_buf = []
         self.regsoon_buf = []
 
+        # turbo cache for selenium elements
         self._cached = {"msisdn": None, "search_btn": None}
 
+        # UI
         self._build_ui()
 
     # =======================
@@ -365,15 +367,22 @@ class App:
         self.badge_regsoon_var = tk.StringVar(value="REGSOON: 0")
         self.badge_skip_var = tk.StringVar(value="SKIP: 0")
 
-        self.badge_valid = tk.Label(badges_frame, textvariable=self.badge_valid_var,
-                                    bg=self._c_valid_bg, fg=self._c_badge_fg,
-                                    font=("Segoe UI", 10, "bold"), padx=12, pady=6, cursor="hand2")
-        self.badge_regsoon = tk.Label(badges_frame, textvariable=self.badge_regsoon_var,
-                                      bg=self._c_regsoon_bg, fg=self._c_badge_fg,
-                                      font=("Segoe UI", 10, "bold"), padx=12, pady=6, cursor="hand2")
-        self.badge_skip = tk.Label(badges_frame, textvariable=self.badge_skip_var,
-                                   bg=self._c_skip_bg, fg=self._c_badge_fg,
-                                   font=("Segoe UI", 10, "bold"), padx=12, pady=6, cursor="hand2")
+        self.badge_valid = tk.Label(
+            badges_frame, textvariable=self.badge_valid_var,
+            bg=self._c_valid_bg, fg=self._c_badge_fg,
+            font=("Segoe UI", 10, "bold"), padx=12, pady=6, cursor="hand2"
+        )
+        self.badge_regsoon = tk.Label(
+            badges_frame, textvariable=self.badge_regsoon_var,
+            bg=self._c_regsoon_bg, fg=self._c_badge_fg,
+            font=("Segoe UI", 10, "bold"), padx=12, pady=6, cursor="hand2"
+        )
+        self.badge_skip = tk.Label(
+            badges_frame, textvariable=self.badge_skip_var,
+            bg=self._c_skip_bg, fg=self._c_badge_fg,
+            font=("Segoe UI", 10, "bold"), padx=12, pady=6, cursor="hand2"
+        )
+
         self.badge_valid.pack(side="left")
         self.badge_regsoon.pack(side="left", padx=10)
         self.badge_skip.pack(side="left")
@@ -424,9 +433,9 @@ class App:
         ttk.Button(btnrow, text="🧾 numbers.txt", command=self.open_numbers_file).pack(side="left", padx=6)
         ttk.Button(btnrow, text="Очистити логи", command=self.clear_logs).pack(side="right")
 
-        hint = ("✅ Профілі: 10 запусків → 10 різних profile_id (1..10). "
-                "Капча працює. Фонові вікна вирівняні по швидкості. "
-                "Є кнопка генерації .bat для профілів.")
+        hint = ("Turbo+Stable: швидкі JS-перевірки + кеш елементів. "
+                "Капча працює (картинки НЕ блокуємо). "
+                "Є генерація 10 .bat для профілів.")
         ttk.Label(actions, text=hint, style="Muted.TLabel", wraplength=980).pack(anchor="w", pady=(10, 0))
 
     def _build_settings_tab(self):
@@ -439,34 +448,14 @@ class App:
         right = ttk.Frame(grid)
         right.pack(side="left", fill="both", expand=True)
 
-        # Chrome profiles
-        prof = ttk.LabelFrame(left, text="Chrome профіль", style="Card.TLabelframe")
-        prof.pack(fill="x", pady=(0, 10))
-
-        ttk.Checkbutton(prof,
-                        text="Використовувати окремий профіль Chrome (рекомендовано для 10 запусків)",
-                        variable=self.use_chrome_profile).pack(anchor="w")
-
-        rprof = ttk.Frame(prof)
-        rprof.pack(fill="x", pady=(8, 0))
-        ttk.Label(rprof, text="Номер профілю (для цієї програми):", style="Muted.TLabel").pack(side="left")
-        ttk.Spinbox(rprof, from_=1, to=100, width=8, textvariable=self.profile_id).pack(side="left", padx=8)
-        ttk.Button(rprof, text="📁 Профілі", command=self.open_profiles_folder).pack(side="left", padx=8)
-
-        rprof2 = ttk.Frame(prof)
-        rprof2.pack(fill="x", pady=(8, 0))
-        ttk.Button(rprof2, text="🧩 Згенерувати 10 .bat (профілі 1..10)", command=self.generate_10_bats).pack(side="left")
-        ttk.Button(rprof2, text="▶ Старт усі 10 (start_all_10.bat)", command=self.open_launchers_folder).pack(side="left", padx=10)
-
-        ttk.Label(prof,
-                  text=f"Папка профілів: ./{PROFILES_ROOT}/profile_XX (створюється автоматично)",
-                  style="Muted.TLabel").pack(anchor="w", pady=(8, 0))
-
         # Source
         src = ttk.LabelFrame(left, text="Джерело номерів", style="Card.TLabelframe")
         src.pack(fill="x", pady=(0, 10))
-        ttk.Checkbutton(src, text="Генерувати номери автоматично (нескінченно, поки галочка увімкнена)",
-                        variable=self.use_generator).pack(anchor="w")
+        ttk.Checkbutton(
+            src,
+            text="Генерувати номери автоматично (нескінченно, поки галочка увімкнена)",
+            variable=self.use_generator
+        ).pack(anchor="w")
 
         prefbox = ttk.LabelFrame(left, text="Префікси генератора", style="Card.TLabelframe")
         prefbox.pack(fill="x", pady=(0, 10))
@@ -487,9 +476,32 @@ class App:
         ttk.Label(row, text="Порядок:", style="Muted.TLabel").pack(side="left")
         ttk.Radiobutton(row, text="З початку", variable=self.order, value="start").pack(side="left", padx=10)
         ttk.Radiobutton(row, text="З кінця", variable=self.order, value="end").pack(side="left", padx=10)
-        ttk.Checkbutton(filebox, text="Зберігати рядки без номерів (текст/дати) у numbers.txt",
-                        variable=self.keep_non_numbers).pack(anchor="w", pady=(8, 0))
+        ttk.Checkbutton(
+            filebox,
+            text="Зберігати рядки без номерів (текст/дати) у numbers.txt",
+            variable=self.keep_non_numbers
+        ).pack(anchor="w", pady=(8, 0))
 
+        # Chrome profile
+        prof = ttk.LabelFrame(left, text="Chrome профіль", style="Card.TLabelframe")
+        prof.pack(fill="x", pady=(0, 10))
+        ttk.Checkbutton(
+            prof,
+            text="Використовувати окремий профіль Chrome (рекомендовано для 10 запусків)",
+            variable=self.use_chrome_profile
+        ).pack(anchor="w")
+        rprof = ttk.Frame(prof)
+        rprof.pack(fill="x", pady=(8, 0))
+        ttk.Label(rprof, text="Номер профілю (для цієї програми):", style="Muted.TLabel").pack(side="left")
+        ttk.Spinbox(rprof, from_=1, to=100, width=8, textvariable=self.profile_id).pack(side="left", padx=8)
+        ttk.Button(rprof, text="📁 Профілі", command=self.open_profiles_folder).pack(side="left", padx=8)
+
+        rprof2 = ttk.Frame(prof)
+        rprof2.pack(fill="x", pady=(8, 0))
+        ttk.Button(rprof2, text="🧩 Згенерувати 10 .bat (профілі 1..10)", command=self.generate_10_bats).pack(side="left")
+        ttk.Button(rprof2, text="📁 launchers", command=self.open_launchers_folder).pack(side="left", padx=10)
+
+        # Wait mode
         waitbox = ttk.LabelFrame(right, text="Очікування «Реєстрація послуг»", style="Card.TLabelframe")
         waitbox.pack(fill="x", pady=(0, 10))
         row1 = ttk.Frame(waitbox)
@@ -502,6 +514,7 @@ class App:
 
         pace = ttk.LabelFrame(right, text="Швидкість", style="Card.TLabelframe")
         pace.pack(fill="x", pady=(0, 10))
+
         r2 = ttk.Frame(pace)
         r2.pack(fill="x")
         ttk.Label(r2, text="Пауза між номерами (сек):", style="Muted.TLabel").pack(side="left")
@@ -511,6 +524,7 @@ class App:
         r3.pack(fill="x", pady=(8, 0))
         ttk.Label(r3, text="Зберігати прогрес кожні N номерів:", style="Muted.TLabel").pack(side="left")
         ttk.Spinbox(r3, from_=1, to=5000, width=8, textvariable=self.save_every_n).pack(side="left", padx=8)
+        ttk.Label(r3, text="(valid.txt + numbers.txt)", style="Muted.TLabel").pack(side="left")
 
         r4 = ttk.Frame(pace)
         r4.pack(fill="x", pady=(8, 0))
@@ -524,9 +538,11 @@ class App:
 
         reg = ttk.LabelFrame(right, text="RegSoon", style="Card.TLabelframe")
         reg.pack(fill="x")
-        ttk.Checkbutton(reg,
-                        text="Записувати в regsoon.txt, якщо є «Реєстрація стартового пакету», але немає «Реєстрація послуг»",
-                        variable=self.write_regsoon).pack(anchor="w")
+        ttk.Checkbutton(
+            reg,
+            text="Записувати в regsoon.txt, якщо є «Реєстрація стартового пакету», але немає «Реєстрація послуг»",
+            variable=self.write_regsoon
+        ).pack(anchor="w")
 
     def _build_logs_tab(self):
         top = ttk.Frame(self.tab_logs)
@@ -559,31 +575,19 @@ class App:
     # Launchers (.bat)
     # =======================
     def generate_10_bats(self):
-        """
-        Creates:
-          launchers/run_profile_01.bat .. run_profile_10.bat
-          launchers/start_all_10.bat
-        Works for both .py and frozen .exe
-        """
         base_dir = os.path.abspath(os.getcwd())
         out_dir = os.path.join(base_dir, LAUNCHERS_DIR)
         os.makedirs(out_dir, exist_ok=True)
 
         exe_or_py = os.path.abspath(sys.executable)  # python.exe or app.exe
         script = current_script_path()
-
         frozen = is_frozen_exe()
 
-        # command template
         def cmd_for(pid: int) -> str:
             if frozen:
-                # exe --profile-id N
                 return f'{quote_win(exe_or_py)} --profile-id {pid}'
-            else:
-                # python script.py --profile-id N
-                return f'{quote_win(exe_or_py)} {quote_win(script)} --profile-id {pid}'
+            return f'{quote_win(exe_or_py)} {quote_win(script)} --profile-id {pid}'
 
-        # individual bats
         for pid in range(1, 11):
             bat_path = os.path.join(out_dir, f"run_profile_{pid:02d}.bat")
             lines = [
@@ -594,7 +598,6 @@ class App:
             with open(bat_path, "w", encoding="utf-8", newline="\r\n") as f:
                 f.write("\r\n".join(lines) + "\r\n")
 
-        # start all
         all_path = os.path.join(out_dir, "start_all_10.bat")
         all_lines = ["@echo off", "cd /d \"%~dp0..\""]
         for pid in range(1, 11):
@@ -608,7 +611,6 @@ class App:
             messagebox.showinfo("Готово", f"Згенеровано .bat у папці:\n{os.path.abspath(out_dir)}\n\nЄ також start_all_10.bat")
         except Exception:
             pass
-
         open_folder(out_dir)
 
     def open_launchers_folder(self):
@@ -773,7 +775,7 @@ class App:
                 return ACCURACY_WAIT_SECONDS
             return max(0.3, float(self.custom_seconds.get()))
         except Exception:
-            return ACCURACY_WAIT_SECONDS
+            return 2.0
 
     def get_pause(self):
         try:
@@ -785,19 +787,19 @@ class App:
         try:
             return max(1, int(self.save_every_n.get()))
         except Exception:
-            return 20
+            return 500
 
     def get_ui_every_n(self):
         try:
             return max(1, int(self.ui_every_n.get()))
         except Exception:
-            return 10
+            return 20
 
     def get_log_every_n(self):
         try:
             return max(1, int(self.log_every_n.get()))
         except Exception:
-            return 10
+            return 50
 
     # =======================
     # TURBO CACHED ELEMENT GETTERS
@@ -1035,6 +1037,9 @@ class App:
             time.sleep(POLL)
         return False
 
+    # =======================
+    # Generator
+    # =======================
     def gen_next_number(self) -> str:
         if len(self.gen_recent) > 200_000:
             self.gen_recent.clear()
@@ -1081,7 +1086,6 @@ class App:
         self.skipped_count = 0
         self.regsoon_count = 0
         self.already_count = 0
-
         self.done_count = 0
         self.total_count = 0
         self.run_started_at = time.time()
@@ -1107,6 +1111,8 @@ class App:
         pause = self.get_pause()
         save_every = self.get_save_every_n()
         wait_seconds = self.get_services_wait()
+        ui_n = self.get_ui_every_n()
+        log_n = self.get_log_every_n()
 
         options = webdriver.ChromeOptions()
         options.add_argument("--disable-notifications")
@@ -1131,7 +1137,7 @@ class App:
         options.add_argument("--disable-backgrounding-occluded-windows")
         options.add_argument("--disable-renderer-backgrounding")
 
-        # use dedicated Chrome profile folder per program (parallel safe)
+        # dedicated profile per instance
         if self.use_chrome_profile.get():
             pid = max(1, int(self.profile_id.get()))
             prof_dir = os.path.abspath(os.path.join(PROFILES_ROOT, f"profile_{pid:02d}"))
@@ -1182,37 +1188,35 @@ class App:
             self._update_progress(0, self.total_count)
             self.run_started_at = time.time()
 
-            def maybe_update_ui(ui_n: int):
+            def maybe_update_ui():
                 if (self.done_count % ui_n) == 0:
                     self._update_eta()
 
-            def process_one(number: str, line_info: str = ""):
-                ui_n = self.get_ui_every_n()
-                log_n = self.get_log_every_n()
+            def maybe_log(msg: str, force: bool = False):
+                if force or (self.done_count % log_n) == 0:
+                    self._log(msg)
 
+            def process_one(number: str, line_info: str = ""):
                 try:
                     if generator_mode and not self.use_generator.get():
                         self._log("🛑 Галочка генератора знята — зупиняю.")
                         self.stop_event.set()
                         return False
-
                     if self.stop_event.is_set():
                         return False
 
                     if (self.done_count % ui_n) == 0:
                         self._set_status(f"380{number}")
 
-                    if (self.done_count % log_n) == 0:
-                        self._log(f"→ 380{number}" + (f" | рядок: {line_info}" if line_info else ""))
+                    maybe_log(f"→ 380{number}" + (f" | рядок: {line_info}" if line_info else ""))
 
                     wait = self.back_to_home_and_open_client(driver)
                     self.set_number_safe(driver, wait, number)
 
                     if not self.wait_search_ready(driver, timeout=WAIT_UI_SECONDS):
                         self.skipped_count += 1
-                        if (self.done_count % log_n) == 0:
-                            self._log(" ⚠ Пошук не активувався → пропуск")
-                        maybe_update_ui(ui_n)
+                        maybe_log(" ⚠ Пошук не активувався → пропуск")
+                        maybe_update_ui()
                         return True
 
                     self.click_search(driver, wait)
@@ -1221,6 +1225,7 @@ class App:
                     services = self.wait_services_only_fast(driver, wait_seconds)
                     has_start_pack = self.has_start_pack_fast(driver)
 
+                    # REGSOON
                     if has_start_pack and not services:
                         if self.write_regsoon.get():
                             self.regsoon_buf.append(number)
@@ -1229,14 +1234,13 @@ class App:
                         else:
                             self._log(" 🕒 RegSoon умова спрацювала, але запис вимкнено → пропуск")
                         self.skipped_count += 1
-                        maybe_update_ui(ui_n)
+                        maybe_update_ui()
                         return True
 
                     if (not services) and (not has_start_pack):
                         self.skipped_count += 1
-                        if (self.done_count % log_n) == 0:
-                            self._log(" ⏭ пропуск (нема «Реєстрація послуг» і нема старт.пакету)")
-                        maybe_update_ui(ui_n)
+                        maybe_log(" ⏭ пропуск (нема «Реєстрація послуг» і нема старт.пакету)")
+                        maybe_update_ui()
                         return True
 
                     if services and has_start_pack:
@@ -1262,21 +1266,19 @@ class App:
                             if not generator_mode:
                                 self.to_delete_numbers.add(number)
 
-                        maybe_update_ui(ui_n)
+                        maybe_update_ui()
                         return True
 
                     self.skipped_count += 1
-                    if (self.done_count % log_n) == 0:
-                        self._log(" ⏭ незрозумілий стан → пропуск")
-                    maybe_update_ui(ui_n)
+                    maybe_log(" ⏭ незрозумілий стан → пропуск")
+                    maybe_update_ui()
                     return True
 
                 except (TimeoutException, StaleElementReferenceException) as e:
                     self.skipped_count += 1
-                    if (self.done_count % log_n) == 0:
-                        self._log(f" ⚠ Selenium timeout/stale → SKIP ({type(e).__name__})")
+                    maybe_log(f" ⚠ Selenium timeout/stale → SKIP ({type(e).__name__})", force=True)
                     self._cache_reset()
-                    maybe_update_ui(ui_n)
+                    maybe_update_ui()
                     return True
 
                 except WebDriverException as e:
@@ -1284,7 +1286,7 @@ class App:
                     msg = e.msg if hasattr(e, "msg") else str(e)
                     self._log(f" ⚠ WebDriverException → SKIP: {msg[:220]}")
                     self._cache_reset()
-                    maybe_update_ui(ui_n)
+                    maybe_update_ui()
                     return True
 
             if generator_mode:
